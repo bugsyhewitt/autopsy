@@ -1,0 +1,285 @@
+# autopsy — Post-v0.1 Directions
+
+Ranked improvement candidates for autopsy, produced during Rotation 1 of Phase 2
+(research lap, 2026-05-26). Each item is scored on three axes:
+
+- **Value**: how much does this improve autopsy's detection power or integration
+  fitness for real-world use?
+- **Feasibility**: how tractable is implementation with the current angr/Python stack,
+  within a single focused Phase 2 implement lap?
+- **Urgency**: is the gap actively hurting users or blocking suite integration today?
+
+Rankings are Tier 1 (implement next) → Tier 3 (later/harder/lower value).
+
+---
+
+## Tier 1 — Implement next
+
+### 1. Double-free detection (CWE-415)
+
+**What it is:** Detect the pattern where `free()` is called twice on the same
+pointer within a function (or across a short call chain). CWE-415 is a natural
+companion to the existing CWE-416 check — the detection machinery is nearly
+identical: track `malloc` → `free` sequences, then check whether the same
+slot/register is freed again before a new allocation intervenes.
+
+**Why it's first:**
+- CWE-416 (use-after-free) is already detected by autopsy at the intra-procedural
+  level. The slot-tracking and alias-register infrastructure in `checks/cwe416.py`
+  is directly reusable: instead of looking for a dereference after free, look for
+  a second `call free` where rdi aliases the same slot.
+- CWE-415 sits at rank #14 on the 2025 CWE Top 25 (MITRE/CISA). It has 9 entries
+  in the CISA KEV catalog, meaning actively exploited in the wild.
+- The detection is fully intra-procedural, matching autopsy's current capability
+  scope — no new symbolic execution technique is required.
+- Adding CWE-415 increases the suite's memory-safety coverage from 4 to 5 CWE
+  classes with very low implementation risk.
+- A new fixture (`tests/fixtures/cwe415-vuln.c`) is a trivial C program; the slow
+  integration test is identical in shape to the CWE-416 slow test.
+
+**Implementation sketch:**
+```python
+# In _scan_function (cwe416.py), after recording free_addr:
+# Instead of hunting for a dereference, keep scanning for another `call free`
+# where rdi aliases ptr_slot. If found → double-free finding.
+```
+
+The new check lives in `autopsy/checks/cwe415.py`, is registered in `CHECKS`,
+and the scope layer gains `"415"` as a valid token.
+
+---
+
+### 2. SARIF output format (`--format sarif`)
+
+**What it is:** Add a `--format sarif` output mode that emits
+[SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html)
+JSON — the Static Analysis Results Interchange Format — alongside the existing
+`--format json`.
+
+**Why it's second:**
+- SARIF is now the de-facto interchange standard for security static analysis.
+  GitHub Code Scanning, VS Code (via the SARIF Viewer extension), Azure DevOps,
+  and Semgrep all consume SARIF natively. Every serious SAST tool that targets
+  integration into DevSecOps pipelines emits SARIF.
+- autopsy's current JSON output is autopsy-specific and requires custom parsers to
+  integrate with downstream tooling. SARIF output costs zero new detection logic
+  and unlocks immediate GitHub integration: users can upload autopsy SARIF to
+  GitHub's `/code-scanning/sarifs` API and see findings annotated inline in PRs.
+- The mapping is clean: one `run` entry, one `tool` descriptor per CWE check, one
+  `result` per `Finding`, `locations[].physicalLocation.address.absoluteAddress`
+  for the binary address, and `relatedLocations` for the taint trace.
+- CWE ids map directly to SARIF's `taxa` array under the CWE taxonomy
+  (`"guid": "1F9...", "name": "CWE-119"`).
+- No new dependencies: SARIF is pure JSON. The implementation is a new
+  `autopsy/sarif.py` emitter called from `cli.py` when `--format sarif` is passed,
+  plus corresponding unit tests (no angr import needed).
+
+**Implementation sketch:**
+```python
+def to_sarif(report: Report) -> dict:
+    # Returns a SARIF 2.1.0-compliant dict
+    # tool.driver.rules = [{id: "CWE-N", ...} for cwe in report.checks]
+    # results = [{ruleId: "CWE-N", message: evidence, locations: [...], ...}]
+    ...
+```
+
+---
+
+## Tier 2 — High value, moderate scope
+
+### 3. AArch64 (ARM64) architecture support
+
+**What it is:** Lift the v0.1 x86_64-only scope guard to also accept
+`aarch64`/`arm64` ELF binaries.
+
+**Why it matters:**
+- The 2025 binary analysis landscape is increasingly AArch64-first: Apple silicon,
+  Android native code, AWS Graviton infrastructure, and IoT/embedded Linux all
+  produce AArch64 ELFs.
+- angr supports AArch64 via VEX IR (libVEX lifts AArch64 natively). The CFGFast
+  call-site traversal, `call_sites_to()`, and the reachability pass all work
+  architecture-agnostically — they operate on VEX IR and capstone disassembly.
+- The main risk: the four v0.1 checks use capstone register-name literals
+  (`rax`, `rbp`, `rdi`, `rsp`) that are x86_64-specific. CWE-416's slot-tracking
+  regex hardcodes `rbp`/`rsp`. AArch64 uses `x0`–`x30`, `sp`, `fp` instead.
+  Making slot-tracking arch-aware (a `platform.py` abstraction keyed on
+  `engine.project.arch.name`) is the implementation challenge.
+- CWE-78 and CWE-190 are simpler: they rely only on call-site discovery and
+  mnemonic scanning, which capstone renders correctly for AArch64.
+- A reasonable Phase 2 scope: add AArch64 support to CWE-78 and CWE-190 only,
+  document the CWE-119/416 x86_64-only constraint explicitly, and update
+  `assert_supported()` to allow `AARCH64` with a check-level scope note.
+
+**Feasibility caveat:** Building AArch64 fixtures requires an AArch64 cross-compiler
+(`aarch64-linux-gnu-gcc`) or QEMU. Alfred's host is x86_64 — confirm toolchain
+availability before committing to this lap.
+
+---
+
+### 4. Interprocedural use-after-free (CWE-416 cross-function)
+
+**What it is:** Extend the CWE-416 check from purely intra-procedural (free and
+use in the same function) to detect the most common cross-function UAF pattern:
+a pointer freed in a callee and then used in the caller, or freed in the caller
+and passed to a callee that uses it.
+
+**Why it matters:**
+- The 2025 CWE Top 25 ranks CWE-416 at #7, with 14 CISA KEV entries (actively
+  exploited). Real-world UAF bugs are almost exclusively cross-function: the
+  freeing code and the dangling dereference live in different functions. autopsy's
+  intra-procedural restriction is the most significant false-negative gap in the
+  current v0.1 detection model.
+- angr's call graph is already built by CFGFast. Extending the check to follow
+  pointer arguments across one call level (caller-callee reachability, function
+  summary propagation) is the standard technique (see UAFDetector, GUEB).
+
+**Feasibility caveat:** Interprocedural analysis with sound alias reasoning risks
+false positives and implementation complexity that may exceed a single Phase 2 lap.
+A practical subset: detect the single-hop pattern (malloc in function A, free in
+function A, pointer returned/stored and dereferenced in function B that A calls
+directly). Scope carefully to avoid overrun.
+
+---
+
+### 5. Out-of-bounds write (CWE-787) distinct from CWE-119
+
+**What it is:** Add an explicit CWE-787 check that targets heap-buffer writes
+specifically — malloc-allocated buffers where the write index is tainted and can
+exceed the allocation size — distinct from the CWE-119 stack-indexed-write detection.
+
+**Why it matters:**
+- CWE-787 (Out-of-bounds Write) is rank #5 on the 2025 CWE Top 25 with 12 CISA KEV
+  entries. CWE-125 (Out-of-bounds Read) is rank #6. Together they represent the
+  single largest exploitable memory-safety class in C/C++ binaries.
+- autopsy's CWE-119 check detects a subclass of this (scaled-index writes) but does
+  not specifically target heap allocation overflows. A dedicated CWE-787 check
+  would combine the `malloc` call-site tracking from CWE-190 with the CWE-119
+  index-computation heuristics to identify heap writes that may exceed the
+  allocated region.
+- The BASICS tool (arXiv Nov 2025) achieves 92% precision on this class using angr.
+
+---
+
+### 6. Confidence scoring on findings
+
+**What it is:** Attach a `confidence` field (0.0–1.0) to each `Finding`, computed
+from the specificity of the evidence gathered by the check.
+
+**Why it matters:**
+- autopsy's v0.1 checks use heuristic detection — they are designed for zero false
+  positives on the fixture binaries, but on real-world targets the heuristics will
+  occasionally fire on benign patterns. Users have no signal about which findings
+  are high-confidence (tight taint trace, clear sink) versus low-confidence
+  (single call-site match, indirect taint).
+- A simple three-level scheme suffices: `high` (taint trace through multiple
+  program points confirmed, no bounds check observed), `medium` (source+sink both
+  present, weak flow evidence), `low` (sink present but source uncertain).
+- The `Finding` dataclass and `BinaryFinding` schema can carry this field without
+  breaking existing consumers (it's additive). The pipeline adapter propagates it.
+- Competitors like cwe-checker and Veracode surface confidence/severity; the
+  absence of confidence scoring makes autopsy harder to triage.
+
+---
+
+## Tier 3 — Later / harder / lower near-term value
+
+### 7. PE (Windows) binary support
+
+**What it is:** Extend `assert_supported()` to accept PE/x86_64 targets.
+
+**Why it's Tier 3:**
+- angr supports PE loading via CLE's PE backend, so the engine layer requires
+  minimal change. The risk is in import-symbol resolution: PE binaries use the IAT
+  (Import Address Table) rather than PLT stubs, and `_resolve_call_target()` in
+  `engine.py` is written for ELF PLT resolution. IAT-aware resolution is a
+  non-trivial engine change.
+- The necromancer suite's core user is the Linux/ELF offensive-security analyst.
+  PE support is a significant scope expansion with modest near-term demand.
+
+---
+
+### 8. PoC input generation (angr path constraints → test case)
+
+**What it is:** For CWE-78 and CWE-119 findings, use angr's path constraint solver
+to produce a concrete stdin value that reaches the vulnerable path.
+
+**Why it's Tier 3:**
+- This was explicitly excluded from v0.1 as "No symbolic execution to PoC input
+  generation." It requires full concolic path tracing from entry to the specific
+  sink address, which is dramatically slower than the current bounded reachability
+  pass and likely to hit path-explosion on real targets.
+- The research (dAngr, 2025 NDSS BAR; ADFEmu) shows active work in this direction
+  but also confirms the computational cost. A good Phase 2 scope is hard to define
+  without risking a budget-exhausted outcome.
+- The right approach is to add this as an optional `--poc` flag that runs only when
+  explicitly requested, constrained to a very low state budget, and clearly marked
+  as best-effort.
+
+---
+
+### 9. VEX IR taint analysis (replace heuristic capstone scanning)
+
+**What it is:** Replace the current check-level detection strategy (capstone
+mnemonic/operand pattern matching) with a proper VEX IR def-use / taint analysis
+using angr's `RDA` (Reaching Definitions Analysis) or a custom VEX-level taint
+propagator.
+
+**Why it's Tier 3:**
+- This is the "deeper abstract interpretation" direction noted in the `AngrEngine`
+  Worker decision comment. It would improve soundness materially — VEX IR taint
+  analysis is insensitive to compiler-specific codegen variation that breaks
+  capstone heuristics.
+- However, implementing a correct VEX-level taint propagator is a large-scope
+  project (comparable to HermeScan or VYPER) that goes beyond a single Phase 2
+  lap. It would likely require a full architecture review and rewrite of all four
+  check modules.
+- Schedule this when autopsy has users reporting false negatives caused by
+  optimized codegen (O2/O3) defeating the current capstone heuristics.
+
+---
+
+### 10. Firmware / bare-metal ELF support
+
+**What it is:** Handle ELF binaries that have no standard C runtime, no libc, and
+no OS syscall interface — microcontroller firmware compiled for ARM Cortex-M or
+RISC-V, for example.
+
+**Why it's Tier 3:**
+- angr supports blob loading but firmware analysis requires custom `SimProcedure`
+  stubs for MMIO, RTOS primitives, and HAL calls. This is a substantial
+  infrastructure effort (see ADFEmu, 2025).
+- autopsy's detection strategy today relies on the presence of standard C library
+  imports (`malloc`, `free`, `system`, `fgets`, etc.) as source/sink anchors. In
+  firmware these are absent or renamed. The entire detection model needs rethinking.
+- Defer until the ELF/x86_64 + AArch64 story is solid.
+
+---
+
+## Implementation order recommendation
+
+```
+Rotation 2:  CWE-415 double-free (#1)        — low scope, high return
+Rotation 3:  SARIF output (#2)               — zero new detection risk, high integration value
+Rotation 4:  AArch64 support (#3)            — medium scope, check toolchain first
+Rotation 5:  Interprocedural CWE-416 (#4)    — bounded to one-hop, clear success criterion
+Rotation 6:  CWE-787 (#5) or confidence (#6) — choose based on user feedback
+```
+
+Items #7–#10 are explicitly deferred; revisit when the Tier 1 and Tier 2 list is
+exhausted or when user demand shifts priorities.
+
+---
+
+## Research sources consulted
+
+- MITRE CWE Top 25 Most Dangerous Software Weaknesses 2025 (cwe.mitre.org)
+- CISA 2025 CWE Top 25 (cisa.gov, December 2025)
+- BASICS: Binary Analysis and Stack Integrity Checker System (arXiv 2511.19670, Nov 2025)
+- LATTE: LLM-Powered Static Binary Taint Analysis (ACM TOSEM, dl.acm.org/doi/10.1145/3711816)
+- HermeScan: Detecting Vulnerabilities in Linux-based IoT Firmware (NDSS 2024)
+- dAngr: Lifting Software Debugging to a Symbolic Level (NDSS BAR 2025)
+- angr documentation: CFG, Decompiler, VEX IR, AArch64 support (docs.angr.io)
+- SARIF support for code scanning (docs.github.com)
+- UAFDetector: Scalable Static Detection of Use-After-Free Vulnerabilities in Binary Code
+- GUEB: Statically detecting use after free on binary code (Springer 2014)
+- Using Binary Analysis Frameworks: The Case for BAP and angr (Springer 2019)
