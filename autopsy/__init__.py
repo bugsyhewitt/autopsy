@@ -9,4 +9,8 @@ multi-hundred-megabyte angr dependency. angr is imported lazily, only inside
 
 __version__ = "0.1.0"
 
+# pipeline_adapter is imported lazily to avoid pulling binary-pipeline
+# at the top level of ``autopsy`` for callers that don't need it.
+# Explicit import:  from autopsy.pipeline_adapter import analyze_binary
+
 __all__ = ["__version__"]
