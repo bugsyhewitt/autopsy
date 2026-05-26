@@ -1,0 +1,27 @@
+autopsy
+Copyright (c) 2026 Bugsy Hewitt
+
+This product includes software and design inspiration from the following
+projects. autopsy is an independent reimplementation and is not affiliated with,
+endorsed by, or derived from the source code of these projects.
+
+--------------------------------------------------------------------------------
+BinAbsInspector — Tencent Keenlab
+--------------------------------------------------------------------------------
+Design inspiration. BinAbsInspector is a static analysis tool for automated
+binary vulnerability detection built on Ghidra's Pcode IR and abstract
+interpretation. autopsy borrows its conceptual model — whole-program flow
+analysis for CWE-aligned vulnerability detection — while taking an entirely
+different, angr-backed, Python-native implementation path.
+
+    https://github.com/KeenSecurityLab/BinAbsInspector
+
+--------------------------------------------------------------------------------
+angr — SecureSystemsLab (and the angr project contributors)
+--------------------------------------------------------------------------------
+Underlying analysis engine. autopsy uses angr (and its bundled components cle,
+pyvex, and claripy) for binary loading, control-flow recovery, and symbolic
+reachability analysis. angr is released under the BSD 2-Clause License.
+
+    https://github.com/angr/angr
+    https://angr.io
