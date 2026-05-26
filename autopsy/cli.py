@@ -45,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--format",
         default="json",
-        choices=["json"],
+        choices=["json", "sarif"],
         help="output format (default: json)",
     )
     parser.add_argument(
@@ -71,6 +71,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.format == "json":
         print(report.to_json())
+    elif args.format == "sarif":
+        from autopsy.sarif import to_sarif_json
+        print(to_sarif_json(report))
 
     if report.state_limit_exceeded:
         # Surface the cap clearly on stderr as well for humans/scripts.
