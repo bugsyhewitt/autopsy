@@ -19,6 +19,7 @@ classifiers = [
 dependencies = [
     # angr brings in cle (loader), pyvex, claripy. Pinned for reproducibility.
     "angr==9.2.217",
+    "binary-finding-schema @ git+https://github.com/bugsyhewitt/binary-finding-schema",
 ]
 
 [project.optional-dependencies]
