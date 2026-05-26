@@ -36,7 +36,7 @@ def test_analyze_runs_selected_check_only(monkeypatch):
 
     monkeypatch.setitem(analyzer.__dict__.setdefault("_patched", {}), "x", 1)
     monkeypatch.setattr("autopsy.checks.CHECKS", {119: fake_119, 190: fake_78,
-                                                  416: fake_78, 78: fake_78})
+                                                  415: fake_78, 416: fake_78, 78: fake_78})
     rep = analyzer.analyze("bin", "119", engine_factory=_fake_factory)
     assert calls == [119]
     assert rep.checks == [119]
@@ -48,10 +48,10 @@ def test_analyze_all_runs_every_check(monkeypatch):
     seen = []
     monkeypatch.setattr(
         "autopsy.checks.CHECKS",
-        {c: (lambda e, c=c: (seen.append(c) or [])) for c in (119, 190, 416, 78)},
+        {c: (lambda e, c=c: (seen.append(c) or [])) for c in (119, 190, 415, 416, 78)},
     )
     rep = analyzer.analyze("bin", "all", engine_factory=_fake_factory)
-    assert seen == [119, 190, 416, 78]
+    assert seen == [119, 190, 415, 416, 78]
     assert rep.findings == []
 
 

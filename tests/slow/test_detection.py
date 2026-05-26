@@ -50,6 +50,15 @@ def test_cwe190_detected(require_angr, fixtures_dir):
     _assert_finding_contract(cwe190[0], 190)
 
 
+def test_cwe415_detected(require_angr, fixtures_dir):
+    rep = _analyze(fixtures_dir, "cwe415-vuln", "415")
+    d = rep.to_dict()
+    assert d["error"] is None
+    cwe415 = [f for f in d["findings"] if f["cwe"] == 415]
+    assert cwe415, f"expected a CWE-415 finding, got {d['findings']}"
+    _assert_finding_contract(cwe415[0], 415)
+
+
 def test_cwe416_detected(require_angr, fixtures_dir):
     rep = _analyze(fixtures_dir, "cwe416-vuln", "416")
     d = rep.to_dict()
@@ -94,6 +103,7 @@ def test_max_states_high_completes_all_fixtures(require_angr, fixtures_dir):
     for name, cwe in [
         ("cwe119-vuln", 119),
         ("cwe190-vuln", 190),
+        ("cwe415-vuln", 415),
         ("cwe416-vuln", 416),
         ("cwe78-vuln", 78),
     ]:

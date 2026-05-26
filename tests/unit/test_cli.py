@@ -17,8 +17,8 @@ def test_help_lists_required_flags(capsys):
     assert "--checks" in out
     assert "--max-states" in out
     assert "--format" in out
-    # The choices for --checks must include all five tokens.
-    for tok in ("119", "190", "416", "78", "all"):
+    # The choices for --checks must include all six tokens.
+    for tok in ("119", "190", "415", "416", "78", "all"):
         assert tok in out
 
 
@@ -27,6 +27,11 @@ def test_checks_default_is_all():
     assert args.checks == "all"
     assert args.max_states == 1000
     assert args.format == "json"
+
+
+def test_format_sarif_accepted():
+    args = cli.build_parser().parse_args(["--binary", "x", "--format", "sarif"])
+    assert args.format == "sarif"
 
 
 def test_binary_is_required():
