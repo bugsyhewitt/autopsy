@@ -77,4 +77,5 @@ def _to_binary_finding(finding) -> BinaryFinding:
         address=hex(finding.address),
         evidence=finding.evidence,
         taint_trace=trace,
+        confidence=getattr(finding, "confidence", "medium"),
     )

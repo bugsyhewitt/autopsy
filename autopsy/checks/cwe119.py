@@ -21,6 +21,10 @@ _SOURCES = {"atoi", "strtol", "atol", "scanf", "__isoc99_scanf", "read", "fgets"
 _INDEX_EXT = {"movsxd", "cdqe", "movsx", "movzx"}
 # A scaled-index memory operand like [reg+reg], [reg+reg*N], or [base+reg].
 _SCALED_INDEX = re.compile(r"\[[a-z0-9]+\s*\+\s*[a-z0-9]+(?:\s*\*\s*[0-9]+)?\]")
+# A *symbolic* scaled index where the index component is itself a register
+# (register base + register index), i.e. a genuinely data-dependent offset:
+# [rax+rdx], [rax+rdx*4]. This is distinct from a static [reg+imm] form.
+_SYMBOLIC_INDEX = re.compile(r"\[[a-z][a-z0-9]*\s*\+\s*[a-z][a-z0-9]*(?:\s*\*\s*[0-9]+)?\]")
 # A store/load opcode family we care about.
 _MEM_OPS = {"mov", "movzx", "movsx"}
 
@@ -40,7 +44,11 @@ def run(engine) -> list[Finding]:
         sink = _find_indexed_access(func)
         if sink is None:
             continue
-        sink_addr, kind = sink
+        sink_addr, kind, symbolic_index = sink
+        # "high" when the scaled-index operand uses a symbolic (register)
+        # index — the offset is genuinely data-dependent. "medium" when the
+        # detection rests on the static index-extension heuristic alone.
+        confidence = "high" if symbolic_index else "medium"
         trace = [
             TaintPoint(
                 src.call_address,
@@ -61,6 +69,7 @@ def run(engine) -> list[Finding]:
                     f"input-derived offset with no preceding bounds check"
                 ),
                 taint_trace=trace,
+                confidence=confidence,
             )
         )
         # One finding per function is sufficient for v0.1.
@@ -69,7 +78,13 @@ def run(engine) -> list[Finding]:
 
 def _find_indexed_access(func):
     """Find a scaled-index store/load that is *not* preceded by a bounds-check
-    compare+branch in the same function. Returns (addr, "write"|"read")."""
+    compare+branch in the same function.
+
+    Returns ``(addr, "write"|"read", symbolic_index)`` where ``symbolic_index``
+    is True when the offending memory operand uses a register index (a genuinely
+    data-dependent offset, e.g. ``[rax+rdx]``) rather than resting only on the
+    static index-extension heuristic.
+    """
     insns = []
     for block in func.blocks:
         try:
@@ -100,7 +115,8 @@ def _find_indexed_access(func):
             return None
         # Determine write vs read: write if the memory operand is the dest.
         kind = "write" if ops.strip().startswith("[") or _dest_is_mem(ops) else "read"
-        return (insn.address, kind)
+        symbolic_index = bool(_SYMBOLIC_INDEX.search(ops))
+        return (insn.address, kind, symbolic_index)
     return None
 
 

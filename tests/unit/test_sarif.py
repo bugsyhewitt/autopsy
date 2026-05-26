@@ -22,10 +22,12 @@ def _make_report(findings=None, checks=None, error=None):
     return r
 
 
-def _finding(cwe=119, fn="vuln_fn", addr=0x401140, evidence="overflow", trace=None):
+def _finding(cwe=119, fn="vuln_fn", addr=0x401140, evidence="overflow", trace=None,
+             confidence="medium"):
     if trace is None:
         trace = [TaintPoint(0x401120, "tainted source"), TaintPoint(addr, "sink")]
-    return Finding(cwe=cwe, function=fn, address=addr, evidence=evidence, taint_trace=trace)
+    return Finding(cwe=cwe, function=fn, address=addr, evidence=evidence,
+                   taint_trace=trace, confidence=confidence)
 
 
 # --- Schema structure ---
@@ -116,6 +118,33 @@ def test_result_taxa_references_cwe():
     sarif = to_sarif(_make_report(findings=[f], checks=[78]))
     taxa = sarif["runs"][0]["results"][0]["taxa"]
     assert any(t["id"] == "78" for t in taxa)
+
+
+# --- Confidence -> SARIF level mapping ---
+
+
+def test_high_confidence_maps_to_error_level():
+    f = _finding(confidence="high")
+    sarif = to_sarif(_make_report(findings=[f]))
+    result = sarif["runs"][0]["results"][0]
+    assert result["level"] == "error"
+    assert result["properties"]["confidence"] == "high"
+
+
+def test_medium_confidence_maps_to_warning_level():
+    f = _finding(confidence="medium")
+    sarif = to_sarif(_make_report(findings=[f]))
+    result = sarif["runs"][0]["results"][0]
+    assert result["level"] == "warning"
+    assert result["properties"]["confidence"] == "medium"
+
+
+def test_low_confidence_maps_to_note_level():
+    f = _finding(confidence="low")
+    sarif = to_sarif(_make_report(findings=[f]))
+    result = sarif["runs"][0]["results"][0]
+    assert result["level"] == "note"
+    assert result["properties"]["confidence"] == "low"
 
 
 # --- Taint trace as relatedLocations ---

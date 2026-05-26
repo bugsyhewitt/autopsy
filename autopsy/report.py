@@ -74,7 +74,9 @@ class Finding:
 
     The serialized form is the public contract verified by the v0.1 criteria:
     every finding must carry ``cwe``, ``function``, ``address``, ``taint_trace``
-    (array of program points), and ``evidence``.
+    (array of program points), and ``evidence``. A ``confidence`` triage level
+    (``"high"``/``"medium"``/``"low"``) is additive — it defaults to
+    ``"medium"`` so checks that do not set it remain valid.
     """
 
     __slots__ = ("_inner", "_cwe_int", "_address_int", "_taint_trace")
@@ -86,6 +88,7 @@ class Finding:
         address: int,
         evidence: str,
         taint_trace: list[TaintPoint] | None = None,
+        confidence: str = "medium",
     ) -> None:
         self._cwe_int = cwe
         self._address_int = address
@@ -99,6 +102,7 @@ class Finding:
                 _TaintTrace(address=hex(tp.address), description=tp.description)
                 for tp in self._taint_trace
             ],
+            confidence=confidence,
         )
 
     @property
@@ -121,6 +125,10 @@ class Finding:
     def taint_trace(self) -> list[TaintPoint]:
         return list(self._taint_trace)
 
+    @property
+    def confidence(self) -> str:
+        return self._inner.confidence
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "cwe": self._cwe_int,
@@ -128,6 +136,7 @@ class Finding:
             "address": hex(self._address_int),
             "taint_trace": [p.to_dict() for p in self._taint_trace],
             "evidence": self._inner.evidence,
+            "confidence": self._inner.confidence,
         }
 
     def __eq__(self, other: object) -> bool:
@@ -139,6 +148,7 @@ class Finding:
             and self._address_int == other._address_int
             and self.evidence == other.evidence
             and self._taint_trace == other._taint_trace
+            and self.confidence == other.confidence
         )
 
     def __hash__(self) -> int:

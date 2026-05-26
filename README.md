@@ -69,7 +69,11 @@ autopsy --binary ./target --checks all --max-states 1000  # completes
 
 autopsy v0.1 detects four whole-program-analysis-required vulnerability
 classes. Each finding carries `cwe`, `function`, `address`, `taint_trace` (an
-array of program points showing the data flow), and `evidence`.
+array of program points showing the data flow), `evidence`, and a
+`confidence` triage level (`"high"` / `"medium"` / `"low"`) computed from how
+specific the gathered evidence is. In SARIF output the confidence maps to
+`result.level` — `high`→`error`, `medium`→`warning`, `low`→`note` — and the raw
+level is preserved in `result.properties.confidence`.
 
 ### CWE-119 — buffer over-read/write via attacker-controlled offset
 
@@ -89,7 +93,8 @@ autopsy --binary tests/fixtures/cwe119-vuln --checks 119 --format json
     {"address": "0x...", "description": "attacker-controlled index introduced via atoi()"},
     {"address": "0x401161", "description": "index used in unchecked write memory access"}
   ],
-  "evidence": "scaled-index memory write in store_at using an input-derived offset with no preceding bounds check"
+  "evidence": "scaled-index memory write in store_at using an input-derived offset with no preceding bounds check",
+  "confidence": "high"
 }
 ```
 
@@ -112,7 +117,8 @@ autopsy --binary tests/fixtures/cwe190-vuln --checks 190 --format json
     {"address": "0x...", "description": "32-bit arithmetic (shl) computes allocation size (overflow surface)"},
     {"address": "0x401182", "description": "computed size passed to malloc()"}
   ],
-  "evidence": "shl producing a 32-bit size feeds malloc() in alloc_records"
+  "evidence": "shl producing a 32-bit size feeds malloc() in alloc_records",
+  "confidence": "medium"
 }
 ```
 
@@ -135,7 +141,8 @@ autopsy --binary tests/fixtures/cwe416-vuln --checks 416 --format json
     {"address": "0x401171", "description": "pointer freed via free()"},
     {"address": "0x40117a", "description": "freed pointer dereferenced (use-after-free)"}
   ],
-  "evidence": "freed pointer reused in main with no intervening call (free at 0x401171, use at 0x40117a)"
+  "evidence": "freed pointer reused in main with no intervening call (free at 0x401171, use at 0x40117a)",
+  "confidence": "high"
 }
 ```
 
@@ -157,7 +164,8 @@ autopsy --binary tests/fixtures/cwe78-vuln --checks 78 --format json
     {"address": "0x4011bc", "description": "attacker-controlled input read via fgets()"},
     {"address": "0x401199", "description": "tainted data reaches command sink system()"}
   ],
-  "evidence": "call to system() in run_cmd with program input read via fgets()"
+  "evidence": "call to system() in run_cmd with program input read via fgets()",
+  "confidence": "medium"
 }
 ```
 

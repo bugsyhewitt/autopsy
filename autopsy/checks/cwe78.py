@@ -51,6 +51,22 @@ def run(engine) -> list[Finding]:
                     f"with program input read via {src.target_name}()"
                 ),
                 taint_trace=trace,
+                confidence=_confidence(sink.target_name),
             )
         )
     return findings
+
+
+def _confidence(sink_name: str) -> str:
+    """Confidence for a CWE-78 finding.
+
+    ``"high"`` when the sink is an ``exec*`` family call that takes the tainted
+    argument directly (``execve``/``execl``/``execlp``/``execvp``); these pass
+    the command/argv straight to the kernel with no shell-quoting opportunity,
+    so a tainted argument reaching them is a tight, high-signal pattern.
+    ``"medium"`` for ``system``/``popen``, where the source+sink pairing is
+    present but the flow evidence is weaker (the heuristic confirms both calls
+    exist program-wide, not a register-level data dependency).
+    """
+    exec_family = {"execve", "execl", "execlp", "execvp"}
+    return "high" if sink_name in exec_family else "medium"

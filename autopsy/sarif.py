@@ -100,9 +100,20 @@ def _rule_for_cwe(cwe: int) -> dict[str, Any]:
     }
 
 
+# Map autopsy's three-level confidence onto SARIF result severity levels.
+# high -> error, medium -> warning, low -> note (SARIF 2.1.0 result.level enum).
+_CONFIDENCE_TO_LEVEL = {
+    "high": "error",
+    "medium": "warning",
+    "low": "note",
+}
+
+
 def _result_for_finding(finding) -> dict[str, Any]:
     """Build a SARIF ``result`` entry for a single Finding."""
     address_int = finding.address
+    confidence = getattr(finding, "confidence", "medium")
+    level = _CONFIDENCE_TO_LEVEL.get(confidence, "warning")
 
     # Primary location is the binary address of the sink.
     location: dict[str, Any] = {
@@ -134,8 +145,12 @@ def _result_for_finding(finding) -> dict[str, Any]:
 
     result: dict[str, Any] = {
         "ruleId": f"CWE-{finding.cwe}",
+        "level": level,
         "message": {"text": finding.evidence},
         "locations": [location],
+        # SARIF property bag carries the raw triage confidence for consumers
+        # that prefer the original three-level scheme over the SARIF level.
+        "properties": {"confidence": confidence},
         "taxa": [
             {
                 "id": str(finding.cwe),

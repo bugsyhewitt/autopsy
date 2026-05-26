@@ -30,6 +30,8 @@ def _assert_finding_contract(finding_dict, cwe):
     assert isinstance(finding_dict["taint_trace"], list)
     assert len(finding_dict["taint_trace"]) >= 1
     assert finding_dict["evidence"]
+    # Every finding carries a triage confidence level.
+    assert finding_dict["confidence"] in ("high", "medium", "low")
 
 
 def test_cwe119_detected(require_angr, fixtures_dir):
@@ -39,6 +41,10 @@ def test_cwe119_detected(require_angr, fixtures_dir):
     cwe119 = [f for f in d["findings"] if f["cwe"] == 119]
     assert cwe119, f"expected a CWE-119 finding, got {d['findings']}"
     _assert_finding_contract(cwe119[0], 119)
+    # The symbolic register-index access is the high-confidence buffer-overflow
+    # pattern; the fixture exercises it.
+    confidences = {f["confidence"] for f in cwe119}
+    assert "high" in confidences, f"expected a high-confidence CWE-119, got {confidences}"
 
 
 def test_cwe190_detected(require_angr, fixtures_dir):
@@ -48,6 +54,9 @@ def test_cwe190_detected(require_angr, fixtures_dir):
     cwe190 = [f for f in d["findings"] if f["cwe"] == 190]
     assert cwe190, f"expected a CWE-190 finding, got {d['findings']}"
     _assert_finding_contract(cwe190[0], 190)
+    # The fixture multiplies a tainted size by a constant element width — one
+    # symbolic operand, so the heuristic reports medium confidence.
+    assert cwe190[0]["confidence"] == "medium"
 
 
 def test_cwe415_detected(require_angr, fixtures_dir):
@@ -57,6 +66,8 @@ def test_cwe415_detected(require_angr, fixtures_dir):
     cwe415 = [f for f in d["findings"] if f["cwe"] == 415]
     assert cwe415, f"expected a CWE-415 finding, got {d['findings']}"
     _assert_finding_contract(cwe415[0], 415)
+    # Double-free is a definitive pattern -> always high confidence.
+    assert cwe415[0]["confidence"] == "high"
 
 
 def test_cwe416_detected(require_angr, fixtures_dir):
@@ -66,6 +77,9 @@ def test_cwe416_detected(require_angr, fixtures_dir):
     cwe416 = [f for f in d["findings"] if f["cwe"] == 416]
     assert cwe416, f"expected a CWE-416 finding, got {d['findings']}"
     _assert_finding_contract(cwe416[0], 416)
+    # The fixture reloads the freed pointer from its stack slot before the use,
+    # so slot aliasing is confirmed -> high confidence.
+    assert cwe416[0]["confidence"] == "high"
 
 
 def test_cwe78_detected(require_angr, fixtures_dir):
@@ -75,6 +89,9 @@ def test_cwe78_detected(require_angr, fixtures_dir):
     cwe78 = [f for f in d["findings"] if f["cwe"] == 78]
     assert cwe78, f"expected a CWE-78 finding, got {d['findings']}"
     _assert_finding_contract(cwe78[0], 78)
+    # The fixture's sink is system() (not an exec* call), so the source+sink
+    # pairing is present but flow evidence is weaker -> medium confidence.
+    assert cwe78[0]["confidence"] == "medium"
 
 
 def test_clean_baseline_zero_false_positives(require_angr, fixtures_dir):

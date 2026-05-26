@@ -157,4 +157,7 @@ def _build_finding(func, malloc_addr, free_addr, second_free_addr):
             f"then freed again at {hex(second_free_addr)}"
         ),
         taint_trace=trace,
+        # Double-free is a definitive pattern: the same slot is handed to free()
+        # twice with no intervening reallocation, confirmed by alias tracking.
+        confidence="high",
     )

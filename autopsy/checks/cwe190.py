@@ -11,6 +11,8 @@ The taint trace records input source, the arithmetic op, and the allocator call.
 
 from __future__ import annotations
 
+import re
+
 from autopsy.report import Finding, TaintPoint
 
 _ALLOCATORS = {"malloc", "calloc", "realloc", "reallocarray"}
@@ -37,7 +39,12 @@ def run(engine) -> list[Finding]:
         arith = _arith_before_call(engine, cfg, call)
         if arith is None:
             continue
-        arith_addr, arith_mnemonic = arith
+        arith_addr, arith_mnemonic, two_reg_operands = arith
+        # "high" when both arithmetic operands are registers (both potentially
+        # carry tainted, data-dependent values that can overflow together);
+        # "medium" when one operand is an immediate/scale constant, so only a
+        # single value is symbolic.
+        confidence = "high" if two_reg_operands else "medium"
         trace = [
             TaintPoint(
                 src.call_address,
@@ -62,14 +69,25 @@ def run(engine) -> list[Finding]:
                     f"{call.target_name}() in {call.caller_function}"
                 ),
                 taint_trace=trace,
+                confidence=confidence,
             )
         )
     return findings
 
 
+# Count of register operands in an arithmetic op decides confidence.
+_E_REGS_RE = re.compile(
+    r"\b(?:eax|ebx|ecx|edx|esi|edi|ebp|esp|r8d|r9d|r10d|r11d|r12d|r13d|r14d|r15d)\b"
+)
+
+
 def _arith_before_call(engine, cfg, call):
-    """Return (addr, mnemonic) of the last overflow-prone 32-bit arithmetic op
-    in the basic block containing ``call``, or None if there is none."""
+    """Return ``(addr, mnemonic, two_reg_operands)`` of the last overflow-prone
+    32-bit arithmetic op in the basic block containing ``call``, or None.
+
+    ``two_reg_operands`` is True when the arithmetic op has two register
+    operands (both potentially tainted) rather than a register/immediate pair.
+    """
     func = cfg.kb.functions.get(call.caller_function)
     if func is None:
         # Fall back to searching by address.
@@ -88,5 +106,6 @@ def _arith_before_call(engine, cfg, call):
             if insn.mnemonic in _ARITH and any(
                 reg in insn.op_str for reg in _E_REGS
             ):
-                candidate = (insn.address, insn.mnemonic)
+                two_reg = len(_E_REGS_RE.findall(insn.op_str)) >= 2
+                candidate = (insn.address, insn.mnemonic, two_reg)
     return candidate

@@ -29,6 +29,34 @@ def test_finding_has_required_contract_fields():
     assert d["evidence"] == "scaled-index write"
 
 
+def test_finding_confidence_defaults_to_medium():
+    f = Finding(cwe=78, function="run_cmd", address=0x40117a, evidence="system()")
+    assert f.confidence == "medium"
+    assert f.to_dict()["confidence"] == "medium"
+
+
+def test_finding_confidence_is_preserved_and_serialized():
+    f = Finding(
+        cwe=415,
+        function="dbl",
+        address=0x401200,
+        evidence="double-free",
+        confidence="high",
+    )
+    assert f.confidence == "high"
+    assert f.to_dict()["confidence"] == "high"
+
+
+def test_finding_confidence_in_report_json():
+    rep = Report(binary="b", checks=[416], max_states=1000)
+    rep.findings = [
+        Finding(cwe=416, function="uaf", address=0x4012, evidence="use-after",
+                confidence="low"),
+    ]
+    parsed = json.loads(rep.to_json())
+    assert parsed["findings"][0]["confidence"] == "low"
+
+
 def test_report_json_roundtrips_and_counts():
     rep = Report(binary="b", checks=[78], max_states=1000)
     rep.findings = [

@@ -160,10 +160,28 @@ exceed the allocation size — distinct from the CWE-119 stack-indexed-write det
 
 ---
 
-### 6. Confidence scoring on findings
+### 6. Confidence scoring on findings ✅ IMPLEMENTED (Rotation 3)
 
-**What it is:** Attach a `confidence` field (0.0–1.0) to each `Finding`, computed
-from the specificity of the evidence gathered by the check.
+**Status:** Shipped. Each `Finding` now carries a three-level `confidence` field
+(`"high"` / `"medium"` / `"low"`, default `"medium"`) computed from the
+specificity of the evidence each check gathered. The field lives on the shared
+`binary_finding_schema.BinaryFinding` (additive, validated, default-safe so
+existing producers like blight are unaffected) and propagates through the JSON
+report, the pipeline adapter, and SARIF output. SARIF maps confidence to
+`result.level` (`high`→`error`, `medium`→`warning`, `low`→`note`) and also
+records the raw level in `result.properties.confidence`. Per-check scheme:
+CWE-78 high for `exec*` sinks / medium for `system`/`popen`; CWE-119 high for a
+symbolic register-index access / medium for the static index-extension
+heuristic; CWE-190 high when both arithmetic operands are registers / medium
+when one is an immediate; CWE-415 always high (definitive double-free); CWE-416
+high when slot aliasing is confirmed via a stack-slot reload / medium for the
+register-copy heuristic.
+
+**What it was:** Attach a `confidence` field to each `Finding`, computed
+from the specificity of the evidence gathered by the check. (The original note
+suggested a 0.0–1.0 scalar; the shipped design uses the three-level scheme
+described below, which is what the "Why it matters" rationale already called
+for and is simpler to triage against.)
 
 **Why it matters:**
 - autopsy's v0.1 checks use heuristic detection — they are designed for zero false

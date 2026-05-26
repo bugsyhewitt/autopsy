@@ -77,6 +77,9 @@ def _scan_function(engine, func):
     free_addr = None
     # Registers currently known to alias the freed pointer (slot reloads/copies).
     alias_regs: set[str] = set()
+    # Registers whose alias was established by reloading the stack slot directly
+    # (confirmed slot aliasing) vs. propagated only through register copies.
+    slot_confirmed_regs: set[str] = set()
 
     for idx, insn in enumerate(insns):
         mn, ops = insn.mnemonic, insn.op_str
@@ -92,6 +95,7 @@ def _scan_function(engine, func):
                 if "rdi" in _regs_aliasing_slot(insns, idx, ptr_slot):
                     free_addr = insn.address
                     alias_regs = set()  # reloads after free establish fresh aliases
+                    slot_confirmed_regs = set()
                 continue
             if free_addr is not None:
                 # A call between free and the use breaks the intra-procedural
@@ -107,16 +111,23 @@ def _scan_function(engine, func):
         m_load = _LOAD_SLOT_TO_REG.match(ops)
         if mn == "mov" and m_load and _slot_key(m_load.group(2), m_load.group(3)) == ptr_slot:
             alias_regs.add(m_load.group(1))
+            slot_confirmed_regs.add(m_load.group(1))
             continue
         m_copy = _REG_COPY.match(ops)
         if mn == "mov" and m_copy and m_copy.group(2) in alias_regs:
             alias_regs.add(m_copy.group(1))
+            if m_copy.group(2) in slot_confirmed_regs:
+                slot_confirmed_regs.add(m_copy.group(1))
             continue
 
         # A dereference through an aliasing register is the use-after-free.
         m_deref = _DEREF_BASE.search(ops)
         if m_deref and m_deref.group(1) in alias_regs:
-            return _build_finding(func, malloc_addr, free_addr, insn.address)
+            # "high" when the dereferenced register's alias is rooted in a
+            # confirmed reload of the freed stack slot; "medium" when it was
+            # reached only through register-to-register copies (heuristic).
+            confidence = "high" if m_deref.group(1) in slot_confirmed_regs else "medium"
+            return _build_finding(func, malloc_addr, free_addr, insn.address, confidence)
 
     return None
 
@@ -149,7 +160,7 @@ def _is_named(engine, insn):
     return engine._resolve_call_target(insn, cfg)
 
 
-def _build_finding(func, malloc_addr, free_addr, use_addr):
+def _build_finding(func, malloc_addr, free_addr, use_addr, confidence="medium"):
     trace = [
         TaintPoint(malloc_addr, "allocation via malloc()"),
         TaintPoint(free_addr, "pointer freed via free()"),
@@ -164,4 +175,5 @@ def _build_finding(func, malloc_addr, free_addr, use_addr):
             f"(free at {hex(free_addr)}, use at {hex(use_addr)})"
         ),
         taint_trace=trace,
+        confidence=confidence,
     )
