@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autopsy"
+version = "0.1.0"
+description = "angr-backed whole-program binary analysis with CWE-aligned vulnerability detection (ELF/x86_64)."
+readme = "README.md"
+requires-python = ">=3.13"
+license = { file = "LICENSE" }
+authors = [{ name = "Bugsy Hewitt" }]
+keywords = ["security", "binary-analysis", "angr", "cwe", "vulnerability", "static-analysis"]
+classifiers = [
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Operating System :: POSIX :: Linux",
+]
+dependencies = [
+    # angr brings in cle (loader), pyvex, claripy. Pinned for reproducibility.
+    "angr==9.2.217",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+autopsy = "autopsy.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/bugsyhewitt/autopsy"
+
+[tool.setuptools]
+packages = ["autopsy", "autopsy.checks"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: tests that import and run angr against real binaries (deselected by default)",
+]
+# By default, do NOT run slow (angr) tests. Run them with: pytest -m slow
+addopts = "-m 'not slow'"
