@@ -48,10 +48,10 @@ def test_analyze_all_runs_every_check(monkeypatch):
     seen = []
     monkeypatch.setattr(
         "autopsy.checks.CHECKS",
-        {c: (lambda e, c=c: (seen.append(c) or [])) for c in (119, 190, 415, 416, 78)},
+        {c: (lambda e, c=c: (seen.append(c) or [])) for c in (119, 190, 415, 416, 78, 787)},
     )
     rep = analyzer.analyze("bin", "all", engine_factory=_fake_factory)
-    assert seen == [119, 190, 415, 416, 78]
+    assert seen == [119, 190, 415, 416, 78, 787]
     assert rep.findings == []
 
 

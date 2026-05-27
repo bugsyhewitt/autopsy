@@ -16,7 +16,7 @@ CC      ?= gcc
 CFLAGS  ?= -O0 -fno-stack-protector -no-pie -g
 ARCH    ?= -m64
 
-SRCS := cwe119-vuln.c cwe190-vuln.c cwe415-vuln.c cwe416-vuln.c cwe78-vuln.c clean-baseline.c
+SRCS := cwe119-vuln.c cwe190-vuln.c cwe415-vuln.c cwe416-vuln.c cwe78-vuln.c cwe787-vuln.c clean-baseline.c
 BINS := $(SRCS:.c=)
 
 .PHONY: all clean

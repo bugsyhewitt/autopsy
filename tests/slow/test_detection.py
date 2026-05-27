@@ -94,6 +94,17 @@ def test_cwe78_detected(require_angr, fixtures_dir):
     assert cwe78[0]["confidence"] == "medium"
 
 
+def test_cwe787_detected(require_angr, fixtures_dir):
+    rep = _analyze(fixtures_dir, "cwe787-vuln", "787")
+    d = rep.to_dict()
+    assert d["error"] is None
+    cwe787 = [f for f in d["findings"] if f["cwe"] == 787]
+    assert cwe787, f"expected a CWE-787 finding, got {d['findings']}"
+    _assert_finding_contract(cwe787[0], 787)
+    # malloc+memcpy taint mismatch heuristic reports medium confidence.
+    assert cwe787[0]["confidence"] == "medium"
+
+
 def test_clean_baseline_zero_false_positives(require_angr, fixtures_dir):
     rep = _analyze(fixtures_dir, "clean-baseline", "all")
     d = rep.to_dict()
@@ -123,6 +134,7 @@ def test_max_states_high_completes_all_fixtures(require_angr, fixtures_dir):
         ("cwe415-vuln", 415),
         ("cwe416-vuln", 416),
         ("cwe78-vuln", 78),
+        ("cwe787-vuln", 787),
     ]:
         rep = analyze(binary=str(fixtures_dir / name), checks_token=str(cwe),
                       max_states=1000)

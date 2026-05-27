@@ -13,7 +13,8 @@ from autopsy.scope import resolve_checks, SUPPORTED_CWES, VALID_TOKENS
         ("415", [415]),
         ("416", [416]),
         ("78", [78]),
-        ("all", [119, 190, 415, 416, 78]),
+        ("787", [787]),
+        ("all", [119, 190, 415, 416, 78, 787]),
     ],
 )
 def test_resolve_checks_valid_tokens(token, expected):
@@ -30,4 +31,4 @@ def test_unknown_token_raises():
 
 
 def test_valid_tokens_constant_complete():
-    assert set(VALID_TOKENS) == {"119", "190", "415", "416", "78", "all"}
+    assert set(VALID_TOKENS) == {"119", "190", "415", "416", "78", "787", "all"}
