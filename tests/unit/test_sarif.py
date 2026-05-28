@@ -120,6 +120,74 @@ def test_result_taxa_references_cwe():
     assert any(t["id"] == "78" for t in taxa)
 
 
+# --- GitHub Code Scanning compliance ---
+
+
+def test_tool_driver_has_version_fields():
+    # GitHub Code Scanning tracks the analyzer build via version/semanticVersion.
+    from autopsy import __version__
+
+    sarif = to_sarif(_make_report())
+    driver = sarif["runs"][0]["tool"]["driver"]
+    assert driver["version"] == __version__
+    assert driver["semanticVersion"] == __version__
+
+
+def test_result_location_has_artifact_location():
+    # GitHub Code Scanning rejects results without a physicalLocation
+    # artifactLocation referencing a file — every result must anchor to the
+    # analyzed binary, not just a raw address.
+    f = _finding()
+    sarif = to_sarif(_make_report(findings=[f]))
+    phys = sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
+    assert phys["artifactLocation"]["uri"] == "/tmp/test-binary"
+    # The precise binary address is still carried alongside the artifact.
+    assert "absoluteAddress" in phys["address"]
+
+
+def test_result_artifact_uri_matches_report_binary():
+    r = Report(binary="/opt/targets/app.elf", checks=[119], max_states=1000)
+    r.findings = [_finding()]
+    sarif = to_sarif(r)
+    phys = sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]
+    assert phys["artifactLocation"]["uri"] == "/opt/targets/app.elf"
+
+
+def test_result_links_rule_by_index():
+    # ruleIndex must point at the matching rule's position in driver.rules.
+    findings = [_finding(cwe=119), _finding(cwe=415, addr=0x4020)]
+    sarif = to_sarif(_make_report(findings=findings, checks=[119, 415]))
+    run = sarif["runs"][0]
+    rules = run["tool"]["driver"]["rules"]
+    for result in run["results"]:
+        idx = result["ruleIndex"]
+        assert rules[idx]["id"] == result["ruleId"]
+
+
+def test_rule_index_resolves_correct_rule_with_mixed_cwes():
+    # Rules are sorted by CWE id; the index map must follow that ordering.
+    f78 = _finding(cwe=78, addr=0x4010)
+    f415 = _finding(cwe=415, addr=0x4020)
+    sarif = to_sarif(_make_report(findings=[f78, f415], checks=[78, 415]))
+    run = sarif["runs"][0]
+    rules = run["tool"]["driver"]["rules"]
+    by_index = {r["ruleIndex"]: r["ruleId"] for r in run["results"]}
+    for idx, rule_id in by_index.items():
+        assert rules[idx]["id"] == rule_id
+
+
+def test_cwe787_has_named_rule_not_generic_fallback():
+    # CWE-787 is a supported detector; its SARIF rule must carry the proper
+    # name/description/helpUri rather than the generic "CWE-787" fallback.
+    f = _finding(cwe=787, addr=0x4030, evidence="heap oob write")
+    sarif = to_sarif(_make_report(findings=[f], checks=[787]))
+    rules = sarif["runs"][0]["tool"]["driver"]["rules"]
+    rule = next(r for r in rules if r["id"] == "CWE-787")
+    assert rule["shortDescription"]["text"] == "Out-of-bounds Write"
+    assert rule["fullDescription"]["text"] == "Out-of-bounds Write"
+    assert rule["helpUri"] == "https://cwe.mitre.org/data/definitions/787.html"
+
+
 # --- Confidence -> SARIF level mapping ---
 
 

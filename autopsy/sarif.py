@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from autopsy import __version__ as _AUTOPSY_VERSION
 from autopsy.report import Report
 
 # SARIF 2.1.0 schema URI (informational; not fetched at runtime).
@@ -76,6 +77,11 @@ _CWE_META: dict[int, dict[str, str]] = {
         "short": "Uncontrolled Format String",
         "uri": "https://cwe.mitre.org/data/definitions/134.html",
     },
+    787: {
+        "name": "Out-of-bounds Write",
+        "short": "Out-of-bounds Write",
+        "uri": "https://cwe.mitre.org/data/definitions/787.html",
+    },
 }
 
 
@@ -114,18 +120,38 @@ _CONFIDENCE_TO_LEVEL = {
 }
 
 
-def _result_for_finding(finding) -> dict[str, Any]:
-    """Build a SARIF ``result`` entry for a single Finding."""
+def _result_for_finding(
+    finding,
+    binary_uri: str,
+    rule_index: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    """Build a SARIF ``result`` entry for a single Finding.
+
+    Args:
+        finding: The :class:`~autopsy.report.Finding` to convert.
+        binary_uri: The analyzed artifact's URI (the binary path). GitHub Code
+            Scanning rejects any result that lacks a
+            ``physicalLocation.artifactLocation`` referencing a file, so every
+            result anchors to the analyzed binary here in addition to carrying
+            the precise binary ``address``.
+        rule_index: Maps each ``CWE-N`` rule id to its 0-based position in
+            ``tool.driver.rules``. When supplied, the result links its rule via
+            ``ruleIndex`` (SARIF best practice for reliable rule resolution by
+            consumers like GitHub Code Scanning).
+    """
     address_int = finding.address
     confidence = getattr(finding, "confidence", "medium")
     level = _CONFIDENCE_TO_LEVEL.get(confidence, "warning")
+    rule_id = f"CWE-{finding.cwe}"
 
-    # Primary location is the binary address of the sink.
+    # Primary location: anchor to the analyzed binary as an artifact (required
+    # by GitHub Code Scanning) and carry the precise sink address alongside it.
     location: dict[str, Any] = {
         "physicalLocation": {
+            "artifactLocation": {"uri": binary_uri},
             "address": {
                 "absoluteAddress": address_int,
-            }
+            },
         },
         "logicalLocations": [
             {
@@ -149,7 +175,7 @@ def _result_for_finding(finding) -> dict[str, Any]:
         })
 
     result: dict[str, Any] = {
-        "ruleId": f"CWE-{finding.cwe}",
+        "ruleId": rule_id,
         "level": level,
         "message": {"text": finding.evidence},
         "locations": [location],
@@ -166,6 +192,10 @@ def _result_for_finding(finding) -> dict[str, Any]:
     }
     if related:
         result["relatedLocations"] = related
+
+    # Link the result to its rule by index when the index map is available.
+    if rule_index is not None and rule_id in rule_index:
+        result["ruleIndex"] = rule_index[rule_id]
 
     return result
 
@@ -188,13 +218,23 @@ def to_sarif(report: Report) -> dict[str, Any]:
         rule_cwes.add(f.cwe)
     rules = [_rule_for_cwe(cwe) for cwe in sorted(rule_cwes)]
 
-    results = [_result_for_finding(f) for f in report.findings]
+    # 0-based rule-id -> position map so each result can link its rule by index
+    # (SARIF best practice; GitHub Code Scanning resolves rules reliably this way).
+    rule_index = {rule["id"]: i for i, rule in enumerate(rules)}
+
+    results = [
+        _result_for_finding(f, report.binary, rule_index) for f in report.findings
+    ]
 
     run: dict[str, Any] = {
         "tool": {
             "driver": {
                 "name": "autopsy",
                 "informationUri": "https://github.com/bugsyhewitt/autopsy",
+                # version/semanticVersion let GitHub Code Scanning and other
+                # consumers track which analyzer build produced the results.
+                "version": _AUTOPSY_VERSION,
+                "semanticVersion": _AUTOPSY_VERSION,
                 "rules": rules,
             }
         },
