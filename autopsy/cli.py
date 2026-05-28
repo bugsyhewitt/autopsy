@@ -75,6 +75,16 @@ def main(argv: list[str] | None = None) -> int:
         from autopsy.sarif import to_sarif_json
         print(to_sarif_json(report))
 
+    if report.skipped_checks:
+        # Some checks were not run on this target's architecture (e.g. the
+        # register-level checks on an AArch64 binary). Note it on stderr so the
+        # JSON/SARIF on stdout stays machine-clean.
+        skipped = ", ".join(f"CWE-{c}" for c in report.skipped_checks)
+        print(
+            f"note: skipped {skipped} (not supported on this target's architecture)",
+            file=sys.stderr,
+        )
+
     if report.state_limit_exceeded:
         # Surface the cap clearly on stderr as well for humans/scripts.
         print(report.error, file=sys.stderr)

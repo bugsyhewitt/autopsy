@@ -105,6 +105,31 @@ def test_cwe787_detected(require_angr, fixtures_dir):
     assert cwe787[0]["confidence"] == "medium"
 
 
+def test_cwe78_detected_on_aarch64(require_angr, fixtures_dir):
+    # AArch64 (ARM64) support: the call-site-driven CWE-78 check must fire on a
+    # `bl` (branch-with-link) call to system() fed by an fgets() source, exactly
+    # as it does for the x86_64 `call` form.
+    rep = _analyze(fixtures_dir, "cwe78-aarch64-vuln", "78")
+    d = rep.to_dict()
+    assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
+    cwe78 = [f for f in d["findings"] if f["cwe"] == 78]
+    assert cwe78, f"expected a CWE-78 finding on aarch64, got {d['findings']}"
+    _assert_finding_contract(cwe78[0], 78)
+    # system() sink -> medium confidence, same as the x86_64 fixture.
+    assert cwe78[0]["confidence"] == "medium"
+
+
+def test_aarch64_skips_register_level_checks(require_angr, fixtures_dir):
+    # On AArch64, the register-level checks (CWE-119/415/416/787) are skipped
+    # rather than producing unsound results; CWE-78/190 still run.
+    rep = _analyze(fixtures_dir, "cwe78-aarch64-vuln", "all")
+    d = rep.to_dict()
+    assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
+    assert set(d["skipped_checks"]) == {119, 415, 416, 787}
+    # The CWE-78 finding still surfaces under "all".
+    assert any(f["cwe"] == 78 for f in d["findings"])
+
+
 def test_clean_baseline_zero_false_positives(require_angr, fixtures_dir):
     rep = _analyze(fixtures_dir, "clean-baseline", "all")
     d = rep.to_dict()

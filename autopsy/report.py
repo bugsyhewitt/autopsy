@@ -171,6 +171,10 @@ class Report:
     state_limit_exceeded: bool = False
     max_states: int = 0
     error: str | None = None
+    # CWE checks that were requested but not run on this target's architecture
+    # (e.g. the register-level checks on an AArch64 binary). Additive and
+    # default-empty so existing consumers are unaffected.
+    skipped_checks: list[int] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -180,6 +184,7 @@ class Report:
             "state_limit_exceeded": self.state_limit_exceeded,
             "findings": [f.to_dict() for f in self.findings],
             "finding_count": len(self.findings),
+            "skipped_checks": self.skipped_checks,
             "error": self.error,
         }
 
