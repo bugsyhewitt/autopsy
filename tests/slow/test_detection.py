@@ -82,6 +82,23 @@ def test_cwe416_detected(require_angr, fixtures_dir):
     assert cwe416[0]["confidence"] == "high"
 
 
+def test_cwe416_interproc_detected(require_angr, fixtures_dir):
+    # Single-hop cross-function use-after-free: run() passes a pointer to
+    # release() (which frees it) then dereferences it after release() returns.
+    rep = _analyze(fixtures_dir, "cwe416-interproc-vuln", "416")
+    d = rep.to_dict()
+    assert d["error"] is None
+    cwe416 = [f for f in d["findings"] if f["cwe"] == 416]
+    assert cwe416, f"expected a cross-function CWE-416 finding, got {d['findings']}"
+    # The dangling dereference lives in the caller (run), not the freeing callee.
+    interproc = [f for f in cwe416 if f["function"] == "run"]
+    assert interproc, f"expected the UAF reported in run(), got {cwe416}"
+    _assert_finding_contract(interproc[0], 416)
+    # Single-hop interprocedural findings are medium confidence.
+    assert interproc[0]["confidence"] == "medium"
+    assert "release" in interproc[0]["evidence"]
+
+
 def test_cwe78_detected(require_angr, fixtures_dir):
     rep = _analyze(fixtures_dir, "cwe78-vuln", "78")
     d = rep.to_dict()
@@ -158,6 +175,7 @@ def test_max_states_high_completes_all_fixtures(require_angr, fixtures_dir):
         ("cwe190-vuln", 190),
         ("cwe415-vuln", 415),
         ("cwe416-vuln", 416),
+        ("cwe416-interproc-vuln", 416),
         ("cwe78-vuln", 78),
         ("cwe787-vuln", 787),
     ]:

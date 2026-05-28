@@ -11,6 +11,7 @@ run without a compiler. This file documents how to regenerate them if needed.
 | `cwe119-vuln.c` / `cwe119-vuln` | source + binary: buffer over-read/write via attacker-controlled offset |
 | `cwe190-vuln.c` / `cwe190-vuln` | source + binary: integer overflow into allocator size |
 | `cwe416-vuln.c` / `cwe416-vuln` | source + binary: intra-procedural use-after-free |
+| `cwe416-interproc-vuln.c` / `cwe416-interproc-vuln` | source + binary: single-hop **interprocedural** use-after-free (free in callee, use in caller) |
 | `cwe78-vuln.c` / `cwe78-vuln` | source + binary: OS command injection into `system()` |
 | `cwe78-aarch64-vuln.c` + `cwe78-aarch64-stubs.c` / `cwe78-aarch64-vuln` | source + binary: **AArch64** OS command injection (exercises ARM64 support) |
 | `clean-baseline.c` / `clean-baseline` | source + binary: none of the four classes (zero-false-positive check) |
@@ -51,9 +52,12 @@ pytest -m slow
 - Addresses in findings are not asserted as literal constants in the tests
   (only that they are present and well-formed), so a rebuild on a different
   toolchain that shifts addresses will not break the suite.
-- If you change a `.c` file, keep the vulnerability pattern intact: the CWE-416
-  fixture in particular **must remain intra-procedural** (malloc, free, and use
-  in the same function with no calls between free and use).
+- If you change a `.c` file, keep the vulnerability pattern intact: the
+  `cwe416-vuln` fixture **must remain intra-procedural** (malloc, free, and use
+  in the same function with no calls between free and use), while the
+  `cwe416-interproc-vuln` fixture **must remain single-hop interprocedural**
+  (the pointer is freed inside a callee that receives it as an argument, then
+  dereferenced in the caller after that call returns, with no intervening call).
 
 ## AArch64 (ARM64) fixture
 

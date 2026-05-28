@@ -116,9 +116,25 @@ availability before committing to this lap.
 
 ---
 
-### 4. Interprocedural use-after-free (CWE-416 cross-function)
+### 4. Interprocedural use-after-free (CWE-416 cross-function) ✅ IMPLEMENTED (Rotation 6)
 
-**What it is:** Extend the CWE-416 check from purely intra-procedural (free and
+**Status:** Shipped — the bounded single-hop subset described in the feasibility
+caveat below. The registered CWE-416 check now runs two passes: the original
+intra-procedural pass and a new single-hop interprocedural pass
+(`autopsy/checks/cwe416_interproc.py`). The interprocedural pass is call-graph
+driven: the engine identifies in-binary functions that free their *incoming
+pointer parameter* (`AngrEngine.in_binary_callees_freeing_arg`), finds each
+such function's callers (`AngrEngine.callers_of`), and checks whether a caller
+dereferences the pointer it passed *after* the freeing call returns, with no
+intervening call (`AngrEngine.caller_uses_arg_after_call`). Findings are merged
+with the intra-procedural results (de-duplicated by use address; the
+higher-fidelity intra finding wins). Cross-function findings carry
+`confidence: "medium"`. Scope is deliberately one hop only — deeper chains are
+not followed, preserving the zero-false-positive guarantee (verified on the
+clean baseline). A new fixture `tests/fixtures/cwe416-interproc-vuln.c` exercises
+the pattern; x86_64 only (SysV `rdi` first-arg + -O0 stack-slot conventions).
+
+**What it was:** Extend the CWE-416 check from purely intra-procedural (free and
 use in the same function) to detect the most common cross-function UAF pattern:
 a pointer freed in a callee and then used in the caller, or freed in the caller
 and passed to a callee that uses it.

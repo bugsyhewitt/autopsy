@@ -213,6 +213,193 @@ class AngrEngine:
                         )
         return results
 
+    def in_binary_callees_freeing_arg(self) -> set[str]:
+        """Names of in-binary functions that call ``free`` on their argument.
+
+        A function ``F`` is reported when its body contains a ``call free``
+        whose pointer argument (``rdi`` on x86_64) aliases ``F``'s first
+        incoming parameter — i.e. ``F`` frees a pointer handed to it by its
+        caller, rather than a pointer it allocated locally. These are the
+        callees that can leave a *caller-held* pointer dangling, which is the
+        single-hop cross-function use-after-free pattern (CWE-416) detected by
+        the interprocedural check.
+
+        x86_64 only: the parameter/argument alias tracking uses the SysV
+        register conventions (first arg in ``rdi``).
+        """
+        cfg = self.cfg()
+        names: set[str] = set()
+        for func in cfg.kb.functions.values():
+            if getattr(func, "is_plt", False) or getattr(func, "is_simprocedure", False):
+                continue
+            if self._frees_incoming_arg(func, cfg):
+                names.add(func.name)
+        return names
+
+    def _frees_incoming_arg(self, func: Any, cfg: Any) -> bool:
+        """True if ``func`` calls ``free`` on its first incoming parameter.
+
+        On x86_64 the first argument arrives in ``rdi``. -O0 codegen spills it
+        to a stack slot in the prologue; before ``call free`` it reloads that
+        slot into ``rdi``. We detect a ``call free`` whose ``rdi`` aliases the
+        slot that the prologue ``mov [rbp-N], rdi`` stored the parameter into.
+        """
+        import re
+
+        store_param = re.compile(
+            r"^(?:qword ptr )?\[(rbp|rsp)\s*([+\-]\s*(?:0x[0-9a-f]+|\d+))\],\s*rdi$"
+        )
+        load_slot = re.compile(
+            r"^(r[a-z0-9]+),\s*(?:qword ptr )?\[(rbp|rsp)\s*([+\-]\s*(?:0x[0-9a-f]+|\d+))\]$"
+        )
+        reg_copy = re.compile(r"^(r[a-z0-9]+),\s*(r[a-z0-9]+)$")
+
+        insns = []
+        for block in func.blocks:
+            try:
+                insns.extend(block.capstone.insns)
+            except Exception:  # pragma: no cover - defensive
+                continue
+        insns.sort(key=lambda i: i.address)
+
+        param_slot: str | None = None
+        for idx, insn in enumerate(insns):
+            if insn.mnemonic == "mov":
+                m = store_param.match(insn.op_str)
+                if m and param_slot is None:
+                    param_slot = f"{m.group(1)}{m.group(2).replace(' ', '')}"
+                    continue
+            if insn.mnemonic == "call" and param_slot is not None:
+                target = self._resolve_call_target(insn, cfg)
+                if target == "free":
+                    # Does rdi alias param_slot at this call?
+                    aliases: set[str] = set()
+                    for prev in insns[max(0, idx - 8): idx]:
+                        ml = load_slot.match(prev.op_str)
+                        if prev.mnemonic == "mov" and ml and \
+                                f"{ml.group(2)}{ml.group(3).replace(' ', '')}" == param_slot:
+                            aliases.add(ml.group(1))
+                            continue
+                        mc = reg_copy.match(prev.op_str)
+                        if prev.mnemonic == "mov" and mc and mc.group(2) in aliases:
+                            aliases.add(mc.group(1))
+                    if "rdi" in aliases:
+                        return True
+        return False
+
+    def callers_of(self, name: str) -> list[CallSite]:
+        """Every in-binary call site that targets the function ``name``.
+
+        Walks the CFG and resolves direct-call targets, returning a
+        :class:`CallSite` for each call to ``name`` from a non-PLT,
+        non-simprocedure function. Used by the interprocedural CWE-416 check to
+        find the callers of a pointer-freeing helper.
+        """
+        cfg = self.cfg()
+        call_mnemonics = self._call_mnemonics()
+        results: list[CallSite] = []
+        for func in cfg.kb.functions.values():
+            if getattr(func, "is_plt", False) or getattr(func, "is_simprocedure", False):
+                continue
+            for block in func.blocks:
+                try:
+                    insns = block.capstone.insns
+                except Exception:  # pragma: no cover - defensive
+                    continue
+                for insn in insns:
+                    if insn.mnemonic not in call_mnemonics:
+                        continue
+                    if self._resolve_call_target(insn, cfg) == name:
+                        results.append(
+                            CallSite(
+                                caller_function=func.name,
+                                call_address=insn.address,
+                                target_name=name,
+                                block_addr=block.addr,
+                            )
+                        )
+        return results
+
+    def caller_uses_arg_after_call(self, caller_name: str, call_addr: int) -> int | None:
+        """Detect a dereference of the call's pointer argument after it returns.
+
+        In caller ``caller_name``, locate the call instruction at
+        ``call_addr``. The pointer passed to it lives in ``rdi`` (x86_64 SysV
+        first argument), which -O0 codegen sources from a stack slot. After the
+        call returns, if that same stack slot is reloaded and dereferenced
+        (memory access through the reloaded register) before any other call,
+        return the address of that dereference; otherwise ``None``.
+
+        This is the caller-side half of the single-hop cross-function
+        use-after-free: the caller hands a pointer to a callee that frees it,
+        then uses the now-dangling pointer.
+
+        x86_64 only.
+        """
+        import re
+
+        load_slot = re.compile(
+            r"^(r[a-z0-9]+),\s*(?:qword ptr )?\[(rbp|rsp)\s*([+\-]\s*(?:0x[0-9a-f]+|\d+))\]$"
+        )
+        reg_copy = re.compile(r"^(r[a-z0-9]+),\s*(r[a-z0-9]+)$")
+        deref_base = re.compile(r"\[(r[a-z0-9]+)")
+
+        cfg = self.cfg()
+        func = None
+        for f in cfg.kb.functions.values():
+            if f.name == caller_name:
+                func = f
+                break
+        if func is None:
+            return None
+
+        insns = []
+        for block in func.blocks:
+            try:
+                insns.extend(block.capstone.insns)
+            except Exception:  # pragma: no cover - defensive
+                continue
+        insns.sort(key=lambda i: i.address)
+
+        call_idx = next((i for i, ins in enumerate(insns) if ins.address == call_addr), None)
+        if call_idx is None:
+            return None
+
+        # Which stack slot supplied rdi to this call (look back a few insns)?
+        arg_slot: str | None = None
+        rdi_aliases: set[str] = {"rdi"}
+        for prev in reversed(insns[max(0, call_idx - 8): call_idx]):
+            mc = reg_copy.match(prev.op_str)
+            if prev.mnemonic == "mov" and mc and mc.group(1) in rdi_aliases:
+                rdi_aliases.add(mc.group(2))
+                continue
+            ml = load_slot.match(prev.op_str)
+            if prev.mnemonic == "mov" and ml and ml.group(1) in rdi_aliases:
+                arg_slot = f"{ml.group(2)}{ml.group(3).replace(' ', '')}"
+                break
+        if arg_slot is None:
+            return None
+
+        # After the call: track reloads of arg_slot and look for a dereference,
+        # stopping at the next call (which would break the single-hop scope).
+        alias_regs: set[str] = set()
+        for insn in insns[call_idx + 1:]:
+            if insn.mnemonic == "call":
+                return None
+            ml = load_slot.match(insn.op_str)
+            if insn.mnemonic == "mov" and ml and \
+                    f"{ml.group(2)}{ml.group(3).replace(' ', '')}" == arg_slot:
+                alias_regs.add(ml.group(1))
+                continue
+            mc = reg_copy.match(insn.op_str)
+            if insn.mnemonic == "mov" and mc and mc.group(2) in alias_regs:
+                alias_regs.add(mc.group(1))
+                continue
+            md = deref_base.search(insn.op_str)
+            if md and md.group(1) in alias_regs:
+                return insn.address
+        return None
+
     def _resolve_call_target(self, insn: Any, cfg: Any) -> str | None:
         """Resolve a call instruction's target to a symbol name if possible.
 
