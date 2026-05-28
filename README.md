@@ -45,7 +45,7 @@ autopsy --version
 ## Usage
 
 ```
-autopsy --binary PATH [--checks {119,190,415,416,78,134,787,all}] [--max-states N] [--format json|sarif]
+autopsy --binary PATH [--checks {119,190,415,416,78,134,787,all}] [--max-states N] [--format json|sarif] [--fail-on LEVEL]
 ```
 
 | Flag | Default | Meaning |
@@ -54,8 +54,36 @@ autopsy --binary PATH [--checks {119,190,415,416,78,134,787,all}] [--max-states 
 | `--checks` | `all` | which CWE check(s) to run |
 | `--max-states N` | `1000` | angr resource cap: max cumulative symbolic states before aborting |
 | `--format` | `json` | output format |
+| `--fail-on LEVEL` | `never` | exit non-zero (code `3`) when findings at or above this confidence are present — for CI/CD build gating |
 
-Exit codes: `0` clean run, `1` engine/load error, `2` state-limit exceeded.
+Exit codes: `0` clean run, `1` engine/load error, `2` state-limit exceeded,
+`3` findings gate tripped (`--fail-on`).
+
+### CI/CD build gating with `--fail-on`
+
+By default autopsy exits `0` even when it finds vulnerabilities, so the analysis
+output is the signal and the exit code only reflects whether the *run* succeeded.
+To make a CI/CD pipeline step fail when vulnerabilities are present, pass
+`--fail-on`:
+
+| `--fail-on` | Trips (exit `3`) when… |
+|---|---|
+| `never` (default) | never — findings do not change the exit code |
+| `any` / `low` | any finding is present (any confidence) |
+| `medium` | a `medium`- or `high`-confidence finding is present |
+| `high` | a `high`-confidence finding is present |
+
+The findings gate runs *after* error handling, so a genuine analysis failure
+(`1` engine/load error or `2` state-limit) is never masked by `--fail-on`. The
+output on stdout (JSON or SARIF) is unchanged; the gate only affects the exit
+code and prints a one-line note to stderr.
+
+```bash
+# Fail the build only on high-confidence findings; ship JSON for the artifact.
+autopsy --binary ./build/app --checks all --fail-on high --format json > autopsy.json
+# stderr (when tripped): fail-on: 2 finding(s) at or above 'high' confidence
+# exit code: 3
+```
 
 ### Architecture support
 

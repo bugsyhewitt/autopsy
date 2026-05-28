@@ -80,3 +80,120 @@ def test_main_engine_error_returns_one(monkeypatch):
     monkeypatch.setattr("autopsy.analyzer.analyze", lambda **kw: fake)
     rc = cli.main(["--binary", "b", "--checks", "78"])
     assert rc == 1
+
+
+# --- --fail-on CI/CD build gate -------------------------------------------
+
+
+def test_fail_on_default_is_never():
+    args = cli.build_parser().parse_args(["--binary", "x"])
+    assert args.fail_on == "never"
+
+
+def test_help_lists_fail_on(capsys):
+    parser = cli.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--help"])
+    out = capsys.readouterr().out
+    assert "--fail-on" in out
+
+
+def test_fail_on_rejects_unknown_level():
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["--binary", "x", "--fail-on", "critical"])
+
+
+def _report_with(*confidences):
+    rpt = Report(binary="b", checks=[119], max_states=1000)
+    rpt.findings = [
+        Finding(cwe=119, function="f", address=0x401000 + i,
+                evidence="e", confidence=c)
+        for i, c in enumerate(confidences)
+    ]
+    return rpt
+
+
+def test_fail_on_never_keeps_zero_even_with_findings(monkeypatch, capsys):
+    monkeypatch.setattr("autopsy.analyzer.analyze",
+                        lambda **kw: _report_with("high", "medium"))
+    rc = cli.main(["--binary", "b"])
+    assert rc == 0
+    # stdout stays clean JSON; nothing about the gate on stderr.
+    json.loads(capsys.readouterr().out)
+
+
+def test_fail_on_any_trips_on_any_finding(monkeypatch, capsys):
+    monkeypatch.setattr("autopsy.analyzer.analyze",
+                        lambda **kw: _report_with("low"))
+    rc = cli.main(["--binary", "b", "--fail-on", "any"])
+    assert rc == 3
+    assert "fail-on" in capsys.readouterr().err
+
+
+def test_fail_on_any_zero_when_no_findings(monkeypatch):
+    monkeypatch.setattr("autopsy.analyzer.analyze",
+                        lambda **kw: Report(binary="b", checks=[119], max_states=1000))
+    rc = cli.main(["--binary", "b", "--fail-on", "any"])
+    assert rc == 0
+
+
+def test_fail_on_low_alias_of_any(monkeypatch):
+    monkeypatch.setattr("autopsy.analyzer.analyze",
+                        lambda **kw: _report_with("low"))
+    rc = cli.main(["--binary", "b", "--fail-on", "low"])
+    assert rc == 3
+
+
+def test_fail_on_high_ignores_lower_confidence(monkeypatch):
+    monkeypatch.setattr("autopsy.analyzer.analyze",
+                        lambda **kw: _report_with("low", "medium"))
+    rc = cli.main(["--binary", "b", "--fail-on", "high"])
+    assert rc == 0
+
+
+def test_fail_on_high_trips_on_high(monkeypatch):
+    monkeypatch.setattr("autopsy.analyzer.analyze",
+                        lambda **kw: _report_with("medium", "high"))
+    rc = cli.main(["--binary", "b", "--fail-on", "high"])
+    assert rc == 3
+
+
+def test_fail_on_medium_trips_on_medium_and_high(monkeypatch):
+    monkeypatch.setattr("autopsy.analyzer.analyze",
+                        lambda **kw: _report_with("medium"))
+    rc = cli.main(["--binary", "b", "--fail-on", "medium"])
+    assert rc == 3
+
+
+def test_fail_on_medium_ignores_low(monkeypatch):
+    monkeypatch.setattr("autopsy.analyzer.analyze",
+                        lambda **kw: _report_with("low"))
+    rc = cli.main(["--binary", "b", "--fail-on", "medium"])
+    assert rc == 0
+
+
+def test_state_limit_takes_precedence_over_fail_on(monkeypatch, capsys):
+    fake = Report(binary="b", checks=[119], max_states=10,
+                  state_limit_exceeded=True, error="state limit exceeded (>10 states)")
+    monkeypatch.setattr("autopsy.analyzer.analyze", lambda **kw: fake)
+    rc = cli.main(["--binary", "b", "--fail-on", "any"])
+    # A genuine analysis failure (2) must not be masked by the findings gate.
+    assert rc == 2
+
+
+def test_engine_error_takes_precedence_over_fail_on(monkeypatch):
+    fake = Report(binary="b", checks=[78], max_states=1000, error="angr failed to load")
+    monkeypatch.setattr("autopsy.analyzer.analyze", lambda **kw: fake)
+    rc = cli.main(["--binary", "b", "--fail-on", "any"])
+    assert rc == 1
+
+
+def test_gate_treats_unknown_confidence_as_medium(monkeypatch):
+    # A finding object whose confidence attribute is unexpected/unset should be
+    # treated as the schema default ("medium") so the gate never silently drops
+    # it under a medium threshold.
+    class _F:
+        confidence = "unexpected"
+
+    assert cli._gate_tripped([_F()], "medium") is True
+    assert cli._gate_tripped([_F()], "high") is False

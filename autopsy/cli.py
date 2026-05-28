@@ -13,6 +13,38 @@ import sys
 from autopsy import __version__
 from autopsy.scope import VALID_TOKENS
 
+# Exit code returned when --fail-on is satisfied by the findings. Chosen to not
+# collide with the existing contract: 0 = clean, 1 = engine error, 2 = state
+# limit exceeded. 3 = the findings gate tripped (CI/CD build-break signal).
+FAIL_ON_EXIT_CODE = 3
+
+# Confidence levels ordered from least to most specific. A --fail-on threshold
+# trips on any finding whose confidence is at or above the chosen level.
+_CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
+
+# --fail-on choices. "never" preserves the v0.1 exit-code contract (findings do
+# not change the exit code). "any" is an alias for "low" (trip on any finding).
+FAIL_ON_CHOICES = ["never", "any", "low", "medium", "high"]
+
+
+def _gate_tripped(findings, fail_on: str) -> bool:
+    """Return True if ``fail_on`` should break the build given ``findings``.
+
+    ``never`` never trips. ``any`` and ``low`` trip on any finding. ``medium``
+    and ``high`` trip only when at least one finding meets that confidence
+    threshold (findings default to ``"medium"``).
+    """
+    if fail_on == "never":
+        return False
+    threshold = _CONFIDENCE_RANK["low" if fail_on == "any" else fail_on]
+    for f in findings:
+        # Findings whose confidence is unset/unknown are treated as "medium"
+        # (the schema default) so the gate never silently ignores them.
+        rank = _CONFIDENCE_RANK.get(getattr(f, "confidence", "medium"), 1)
+        if rank >= threshold:
+            return True
+    return False
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -47,6 +79,18 @@ def build_parser() -> argparse.ArgumentParser:
         default="json",
         choices=["json", "sarif"],
         help="output format (default: json)",
+    )
+    parser.add_argument(
+        "--fail-on",
+        default="never",
+        choices=FAIL_ON_CHOICES,
+        metavar="LEVEL",
+        help=(
+            "exit non-zero (code 3) when findings at or above this confidence "
+            "are present, for CI/CD build gating: never (default, findings do "
+            "not affect exit code), any/low (any finding), medium, high "
+            f"(choices: {', '.join(FAIL_ON_CHOICES)})"
+        ),
     )
     parser.add_argument(
         "--version",
@@ -92,6 +136,17 @@ def main(argv: list[str] | None = None) -> int:
     if report.error:
         print(report.error, file=sys.stderr)
         return 1
+
+    # CI/CD build gate: if --fail-on is set and matching findings exist, exit
+    # non-zero so a pipeline step fails. This runs only after error/state-limit
+    # handling so a genuine analysis failure (1/2) is never masked by the gate.
+    if _gate_tripped(report.findings, args.fail_on):
+        n = len(report.findings)
+        print(
+            f"fail-on: {n} finding(s) at or above '{args.fail_on}' confidence",
+            file=sys.stderr,
+        )
+        return FAIL_ON_EXIT_CODE
     return 0
 
 
