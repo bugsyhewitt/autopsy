@@ -671,6 +671,121 @@ class AngrEngine:
                 )
         return results
 
+    # Bulk-copy/fill sinks mapped to the SysV/x86_64 register that carries their
+    # *length* (byte-count) argument. ``strcpy`` is deliberately absent: it takes
+    # no explicit length (it copies until a NUL), so its write extent is never a
+    # compile-time literal and it is always treated as a potential overflow sink.
+    _COPY_SINK_LEN_REG: dict[str, str] = {
+        "memcpy": "rdx",    # memcpy(dst, src, n)
+        "memmove": "rdx",   # memmove(dst, src, n)
+        "memset": "rdx",    # memset(dst, c, n)
+        "strncpy": "rdx",   # strncpy(dst, src, n)
+        "strncat": "rdx",   # strncat(dst, src, n)
+        "bcopy": "rdx",     # bcopy(src, dst, n)
+    }
+
+    def copy_call_length_is_literal(
+        self, caller_function: str, call_address: int, sink_name: str
+    ) -> bool:
+        """True if a bulk-copy sink's *length* argument is a compile-time literal.
+
+        For a copy/fill call (``memcpy``/``memmove``/``memset``/``strncpy``/
+        ``strncat``/``bcopy``) in ``caller_function`` at ``call_address``, walk
+        back from the call and resolve how the length-argument register (``rdx``
+        on x86_64 SysV) was last set. If it was set by an immediate move
+        (``mov rdx, 0x3f``) the copy length is a fixed compile-time constant and
+        therefore *cannot* be attacker-controlled — such a call cannot produce a
+        tainted out-of-bounds heap write, so the CWE-787 co-location heuristic
+        must not flag on it.
+
+        Returns ``True`` only when the length is provably an immediate. If the
+        length comes from a stack slot, a register, or cannot be resolved, the
+        method returns ``False`` (conservative: treat as possibly-tainted).
+        ``strcpy`` (no length argument) always returns ``False``.
+
+        x86_64 only: the length-argument register mapping uses the SysV calling
+        convention. On non-AMD64 targets this returns ``False`` (the register
+        checks are arch-gated upstream and the heuristic stays conservative).
+        """
+        import re
+
+        if self.project.arch.name != "AMD64":
+            return False
+        len_reg = self._COPY_SINK_LEN_REG.get(sink_name)
+        if len_reg is None:
+            return False
+
+        # 32-bit sub-register alias: edx writes zero-extend into rdx, and -O0
+        # codegen materializes a small literal length as `mov edx, 0x3f`.
+        len_aliases = {len_reg, "e" + len_reg[1:]}
+
+        # reg <- immediate: a compile-time constant length.
+        mov_imm = re.compile(r"^(r[a-z0-9]+|e[a-z0-9]+),\s*(?:0x[0-9a-f]+|\d+)$")
+        # reg <- reg: a register copy (alias propagation).
+        reg_copy = re.compile(r"^(r[a-z0-9]+|e[a-z0-9]+),\s*(r[a-z0-9]+|e[a-z0-9]+)$")
+        # reg <- [rbp/rsp +/- N]: a stack-slot reload (non-literal / possibly tainted).
+        load_slot = re.compile(
+            r"^(r[a-z0-9]+|e[a-z0-9]+),\s*(?:[a-z]+ ptr )?\[(rbp|rsp)\s*[+\-]"
+        )
+
+        cfg = self.cfg()
+        func = None
+        for f in cfg.kb.functions.values():
+            if f.name == caller_function:
+                func = f
+                break
+        if func is None:
+            return False
+
+        insns: list[Any] = []
+        for block in func.blocks:
+            try:
+                insns.extend(block.capstone.insns)
+            except Exception:  # pragma: no cover - defensive
+                continue
+        insns.sort(key=lambda i: i.address)
+
+        call_idx = next(
+            (i for i, ins in enumerate(insns) if ins.address == call_address), None
+        )
+        if call_idx is None:
+            return False
+
+        # mov-family mnemonics that move a value into a register: plain mov plus
+        # the sign/zero-extending forms -O0 uses to widen a small length
+        # (`movsxd rdx, eax`, `movzx`, `movsx`).
+        mov_like = {"mov", "movsxd", "movsx", "movzx"}
+
+        # Walk back resolving how the length register was last set, following
+        # register-copy aliases (e.g. `movsxd rdx, eax; mov eax, 0x10`).
+        for prev in reversed(insns[max(0, call_idx - 12): call_idx]):
+            if prev.mnemonic not in mov_like:
+                continue
+            mi = mov_imm.match(prev.op_str)
+            if mi and self._reg_in(mi.group(1), len_aliases):
+                return True  # length set from an immediate -> literal
+            ms = load_slot.match(prev.op_str)
+            if ms and self._reg_in(ms.group(1), len_aliases):
+                return False  # length reloaded from a stack slot -> possibly tainted
+            mc = reg_copy.match(prev.op_str)
+            if mc and self._reg_in(mc.group(1), len_aliases):
+                # dest aliases the length reg; follow its source instead.
+                len_aliases = len_aliases | {mc.group(2), self._widen(mc.group(2))}
+                continue
+        return False
+
+    @staticmethod
+    def _widen(reg: str) -> str:
+        """Map a 32-bit sub-register name to its 64-bit form (edx -> rdx)."""
+        if reg.startswith("e") and len(reg) >= 2:
+            return "r" + reg[1:]
+        return reg
+
+    @staticmethod
+    def _reg_in(reg: str, aliases: set[str]) -> bool:
+        """True if ``reg`` (or its 64-bit widening) is in the alias set."""
+        return reg in aliases or AngrEngine._widen(reg) in aliases
+
     def _resolve_call_target(self, insn: Any, cfg: Any) -> str | None:
         """Resolve a call instruction's target to a symbol name if possible.
 

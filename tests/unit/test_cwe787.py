@@ -56,8 +56,15 @@ class MockEngine:
         return MockCFG()
 
 
-def _make_engine(allocs, sources, copies):
-    """Build a mock engine with explicit per-category call-site lists."""
+def _make_engine(allocs, sources, copies, literal_lengths=None):
+    """Build a mock engine with explicit per-category call-site lists.
+
+    ``literal_lengths`` is an optional set of ``(function, address)`` tuples that
+    the engine's ``copy_call_length_is_literal`` reports as literal-length copies
+    (which the check must suppress). If ``literal_lengths`` is ``None`` the mock
+    engine does NOT expose ``copy_call_length_is_literal`` at all, exercising the
+    backward-compatible path where the helper is absent.
+    """
 
     class _E:
         def __init__(self):
@@ -77,7 +84,15 @@ def _make_engine(allocs, sources, copies):
                 return self._copies
             return []
 
-    return _E()
+    eng = _E()
+    if literal_lengths is not None:
+        literal = set(literal_lengths)
+
+        def copy_call_length_is_literal(function, address, sink_name):
+            return (function, address) in literal
+
+        eng.copy_call_length_is_literal = copy_call_length_is_literal
+    return eng
 
 
 # ---------------------------------------------------------------------------
@@ -274,3 +289,86 @@ def test_taint_trace_copy_description_mentions_copy_sink():
     findings = cwe787.run(engine)
     trace = findings[0].taint_trace
     assert "memcpy" in trace[2].description
+
+
+# ---------------------------------------------------------------------------
+# Literal-length suppression (R9 false-positive fix)
+# ---------------------------------------------------------------------------
+
+
+def test_literal_length_copy_suppressed():
+    """A copy sink with a compile-time literal length must NOT be flagged.
+
+    This is the clean-baseline false positive: malloc(64) + strncpy(p, line, 63)
+    + fgets. The 63 is a literal immediate, so the write extent is fixed and
+    cannot be tainted -> zero findings.
+    """
+    engine = _make_engine(
+        allocs=[_make_cs("malloc", caller_function="main", call_address=0x4011dc)],
+        sources=[_make_cs("fgets", caller_function="main", call_address=0x401191)],
+        copies=[_make_cs("strncpy", caller_function="main", call_address=0x4011ff)],
+        literal_lengths={("main", 0x4011ff)},
+    )
+    assert cwe787.run(engine) == []
+
+
+def test_nonliteral_length_copy_still_flagged():
+    """A copy sink with a non-literal (possibly-tainted) length still fires."""
+    engine = _make_engine(
+        allocs=[_make_cs("malloc", caller_function="copy_to_heap", call_address=0x401188)],
+        sources=[_make_cs("fgets", caller_function="main", call_address=0x401200)],
+        copies=[_make_cs("memcpy", caller_function="copy_to_heap", call_address=0x4012ec)],
+        literal_lengths=set(),  # nothing literal -> finding fires
+    )
+    findings = cwe787.run(engine)
+    assert len(findings) == 1
+    assert findings[0].function == "copy_to_heap"
+    assert findings[0].confidence == "medium"
+
+
+def test_function_with_only_literal_copies_suppressed_but_others_fire():
+    """Per-function suppression: a literal-only function is dropped, others kept."""
+    engine = _make_engine(
+        allocs=[
+            _make_cs("malloc", caller_function="safe_fn", call_address=0x1000),
+            _make_cs("malloc", caller_function="vuln_fn", call_address=0x2000),
+        ],
+        sources=[_make_cs("fgets", caller_function="main", call_address=0x500)],
+        copies=[
+            _make_cs("strncpy", caller_function="safe_fn", call_address=0x1100),
+            _make_cs("memcpy", caller_function="vuln_fn", call_address=0x2100),
+        ],
+        literal_lengths={("safe_fn", 0x1100)},  # safe_fn literal; vuln_fn tainted
+    )
+    findings = cwe787.run(engine)
+    assert len(findings) == 1
+    assert findings[0].function == "vuln_fn"
+
+
+def test_function_with_mixed_copies_fires_on_nonliteral():
+    """A function with both a literal and a non-literal copy still fires."""
+    engine = _make_engine(
+        allocs=[_make_cs("malloc", caller_function="vuln_fn", call_address=0x2000)],
+        sources=[_make_cs("fgets", caller_function="main", call_address=0x500)],
+        copies=[
+            _make_cs("strncpy", caller_function="vuln_fn", call_address=0x2100),
+            _make_cs("memcpy", caller_function="vuln_fn", call_address=0x2200),
+        ],
+        literal_lengths={("vuln_fn", 0x2100)},  # only the strncpy is literal
+    )
+    findings = cwe787.run(engine)
+    assert len(findings) == 1
+    assert findings[0].function == "vuln_fn"
+    # The reported copy site is the non-literal one (the eligible sink).
+    assert findings[0].address == 0x2200
+
+
+def test_legacy_engine_without_helper_still_flags():
+    """An engine lacking copy_call_length_is_literal keeps legacy behavior."""
+    engine = _make_engine(
+        allocs=[_make_cs("malloc", caller_function="vuln_func", call_address=0x401000)],
+        sources=[_make_cs("atoi", caller_function="main", call_address=0x400500)],
+        copies=[_make_cs("memcpy", caller_function="vuln_func", call_address=0x401100)],
+        literal_lengths=None,  # helper absent
+    )
+    assert len(cwe787.run(engine)) == 1

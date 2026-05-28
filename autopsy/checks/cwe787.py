@@ -12,17 +12,23 @@ Detection steps:
   2. For each allocator call, check whether the function also contains a call
      to a bulk-copy/fill function (memcpy, memmove, strcpy, memset) in the
      same function.
-  3. Confirm that the program has at least one attacker-controlled input
+  3. Require at least one *eligible* copy sink in that function — one whose
+     length argument is NOT a compile-time literal.  A copy with a literal
+     (immediate) length (e.g. ``strncpy(p, line, 63)`` against ``malloc(64)``)
+     has a fixed, attacker-independent write extent and cannot produce a
+     tainted out-of-bounds write, so it is excluded.  ``strcpy`` has no length
+     argument and is always eligible.
+  4. Confirm that the program has at least one attacker-controlled input
      source in scope (same ``_SOURCES`` set as CWE-190).
-  4. Flag with severity HIGH, confidence "medium" — the two-argument
+  5. Flag with severity HIGH, confidence "medium" — the two-argument
      mismatch heuristic catches the structural pattern but cannot prove at
      this level of analysis that M > N on all paths.
 
 Confidence rationale:
-  "medium" — we confirm the co-location of allocator + copy sink in one
-  function AND the presence of an input source, but we do not symbolically
-  evaluate whether M > N.  That would require full heap-size tracking which
-  is a post-v0.1 direction.
+  "medium" — we confirm the co-location of allocator + copy sink (with a
+  non-literal length) in one function AND the presence of an input source, but
+  we do not symbolically evaluate whether M > N.  That would require full
+  heap-size tracking which is a post-v0.1 direction.
 
 [Worker decision: function-scope co-location heuristic] Full def-use chain
 tracking from malloc return value to copy destination is complex and fragile
@@ -30,6 +36,16 @@ in angr CFGFast mode.  The co-location heuristic (allocator + copy in same
 function + input source in program) matches the real-world pattern
 ``malloc(n); memcpy(dst, src, m)`` where n and m are independent tainted
 values and is sufficient for a "medium" confidence finding.
+
+[Worker decision: literal-length suppression (R9)] The original co-location
+heuristic fired on the clean-baseline binary, which contains the entirely safe
+``malloc(64); strncpy(p, line, 63)`` pattern — a false positive, because the
+copy length (63) is a compile-time constant and cannot be tainted.  The check
+now asks the engine whether each copy sink's length argument is a literal
+immediate (``engine.copy_call_length_is_literal``); a function is only flagged
+if it has at least one copy sink whose length is *not* provably literal.  This
+restores the zero-false-positive guarantee on the clean baseline while still
+catching the genuinely-vulnerable variable-length copy pattern.
 """
 
 from __future__ import annotations
@@ -63,8 +79,24 @@ def run(engine) -> list[Finding]:
     for cs in alloc_calls:
         alloc_by_func.setdefault(cs.caller_function, []).append(cs)
 
+    # Only copy sinks whose length argument is NOT a provable compile-time
+    # literal are eligible: a literal-length copy (e.g. strncpy(p, line, 63))
+    # has a fixed, attacker-independent write extent and cannot cause a tainted
+    # out-of-bounds write. ``strcpy`` (no length argument) is always eligible.
+    # ``engine.copy_call_length_is_literal`` may be absent on lightweight mock
+    # engines; treat its absence as "not literal" (conservative, preserves the
+    # legacy co-location behavior for callers that do not provide it).
+    length_is_literal = getattr(engine, "copy_call_length_is_literal", None)
+
+    def _eligible(cs) -> bool:
+        if length_is_literal is None:
+            return True
+        return not length_is_literal(cs.caller_function, cs.call_address, cs.target_name)
+
     copy_by_func: dict[str, list] = {}
     for cs in copy_calls:
+        if not _eligible(cs):
+            continue
         copy_by_func.setdefault(cs.caller_function, []).append(cs)
 
     # The "nearest" input source for the taint trace (earliest call address).
