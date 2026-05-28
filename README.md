@@ -45,7 +45,8 @@ autopsy --version
 ## Usage
 
 ```
-autopsy --binary PATH [--checks {119,190,415,416,78,134,787,all}] [--max-states N] [--format json|sarif] [--fail-on LEVEL]
+autopsy --binary PATH [--checks {119,190,415,416,78,134,787,all}] [--max-states N]
+        [--format json|sarif] [--fail-on LEVEL] [--baseline PATH] [--write-baseline PATH]
 ```
 
 | Flag | Default | Meaning |
@@ -55,6 +56,8 @@ autopsy --binary PATH [--checks {119,190,415,416,78,134,787,all}] [--max-states 
 | `--max-states N` | `1000` | angr resource cap: max cumulative symbolic states before aborting |
 | `--format` | `json` | output format |
 | `--fail-on LEVEL` | `never` | exit non-zero (code `3`) when findings at or above this confidence are present — for CI/CD build gating |
+| `--baseline PATH` | (none) | suppress findings recorded as accepted in this baseline file (build-resilient fingerprints) |
+| `--write-baseline PATH` | (none) | write the current run's findings to PATH as a baseline (then exit `0`); `-` writes to stdout |
 
 Exit codes: `0` clean run, `1` engine/load error, `2` state-limit exceeded,
 `3` findings gate tripped (`--fail-on`).
@@ -84,6 +87,40 @@ autopsy --binary ./build/app --checks all --fail-on high --format json > autopsy
 # stderr (when tripped): fail-on: 2 finding(s) at or above 'high' confidence
 # exit code: 3
 ```
+
+### Baselining: fail only on *new* findings (`--baseline`)
+
+A static-analysis gate is unusable in CI if every run re-fails the build on the
+same already-triaged findings. autopsy supports a **baseline**: record the set
+of accepted findings once, then suppress those on subsequent runs so the gate
+fires only on *new* findings. This is the canonical "break the build only when a
+new vulnerability appears" workflow, and it pairs directly with `--fail-on`.
+
+Findings are matched by a **build-resilient fingerprint** — a short digest of
+the CWE id, the containing function, and the evidence string. The absolute
+address is deliberately *excluded* because it shifts on every recompile; a
+baseline keyed on address would be worthless after the next build. So once you
+accept an issue, it stays suppressed across rebuilds as long as the underlying
+vulnerable pattern is unchanged.
+
+```bash
+# 1. Capture the current (already-triaged) findings as the accepted baseline.
+autopsy --binary ./build/app --checks all --write-baseline autopsy-baseline.json
+#    -> writes autopsy-baseline.json, exits 0 (writing a baseline never breaks the build)
+
+# 2. On every later run, suppress the accepted findings and fail only on new ones.
+autopsy --binary ./build/app --checks all --baseline autopsy-baseline.json --fail-on high
+#    exit 0 if no new high-confidence findings; exit 3 (build break) if a new one appears
+#    stderr: note: suppressed N finding(s) via baseline autopsy-baseline.json
+```
+
+Commit `autopsy-baseline.json` to the repo. Suppressed findings are removed from
+both the JSON/SARIF output and the `--fail-on` gate; the stdout report stays
+machine-clean and the suppression count is noted on stderr. The baseline file is
+deterministic (sorted, de-duplicated) for clean diffs, and `--baseline` also
+accepts a bare JSON array of fingerprint strings for hand-maintained allowlists.
+A genuine analysis failure (`1`/`2`) always takes precedence: a baseline is
+never written from, nor applied to, a half-finished run.
 
 ### Architecture support
 
