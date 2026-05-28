@@ -336,6 +336,53 @@ autopsy --binary tests/fixtures/cwe134-vuln --checks 134 --format json
 > `fprintf`/`sprintf`/`syslog`, `rdx` for `snprintf`) and runs on x86_64
 > (AMD64) targets only; on AArch64 the register-level checks are skipped.
 
+### CWE-787 — out-of-bounds write (heap buffer overflow)
+
+A heap buffer is allocated (`malloc`/`calloc`/`realloc`) and then written by a
+bulk-copy/fill sink (`memcpy`/`memmove`/`strncpy`/`strncat`/`memset`/`bcopy`/
+`strcpy`) in the same function, where the copy length is an *independent*
+value — so the write may exceed the allocation size. A finding requires the
+allocator and the copy sink to be co-located in one function **and** at least
+one attacker-controlled input source (`fgets`/`read`/`scanf`/…) in the program.
+
+**Literal-length copies are excluded.** A copy whose length argument is a
+compile-time immediate (e.g. `strncpy(p, line, 63)` against `malloc(64)`) has a
+fixed, attacker-independent write extent and cannot produce a *tainted*
+out-of-bounds write — the check resolves the sink's length-argument register
+(`rdx` on x86_64 SysV) and suppresses any copy whose length is a literal. Only
+copies whose length is reloaded from a stack slot or a register (i.e. possibly
+tainted) are flagged. `strcpy` has no explicit length argument and is always
+treated as a potential overflow sink. This is what holds the zero-false-positive
+line on the clean baseline, whose only copy is a literal-length `strncpy`.
+
+Because the analysis confirms the co-located allocator + variable-length copy +
+program-wide input source — but does not symbolically prove the copy length
+exceeds the allocation size on all paths — these findings carry
+`confidence: "medium"`.
+
+```bash
+autopsy --binary tests/fixtures/cwe787-vuln --checks 787 --format json
+```
+
+```json
+{
+  "cwe": 787,
+  "function": "copy_to_heap",
+  "address": "0x4012ec",
+  "taint_trace": [
+    {"address": "0x401200", "description": "attacker-controlled value introduced via fgets()"},
+    {"address": "0x401188", "description": "heap buffer allocated via malloc() — size may be tainted"},
+    {"address": "0x4012ec", "description": "memcpy() writes into heap buffer with independent length — length may exceed allocation size"}
+  ],
+  "evidence": "malloc() allocation and memcpy() write co-located in copy_to_heap: independent tainted size and length arguments risk out-of-bounds heap write",
+  "confidence": "medium"
+}
+```
+
+> The CWE-787 check uses x86_64 SysV register/stack-slot conventions (the copy
+> length argument is in `rdx`) and runs on x86_64 (AMD64) targets only; on
+> AArch64 the register-level checks are skipped.
+
 ---
 
 ## How it relates to `blight`
