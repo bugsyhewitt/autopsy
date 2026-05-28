@@ -93,6 +93,25 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--baseline",
+        metavar="PATH",
+        help=(
+            "suppress findings recorded as accepted in this baseline file "
+            "(build-resilient fingerprints). Pair with --fail-on to break the "
+            "build only on NEW findings. Suppressed findings are removed from "
+            "the JSON/SARIF output and from the --fail-on gate"
+        ),
+    )
+    parser.add_argument(
+        "--write-baseline",
+        metavar="PATH",
+        help=(
+            "write the current run's findings to PATH as a baseline file (then "
+            "exit 0 without applying --fail-on), so future runs can suppress "
+            "them with --baseline. '-' writes the baseline to stdout"
+        ),
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"autopsy {__version__}",
@@ -113,11 +132,62 @@ def main(argv: list[str] | None = None) -> int:
         max_states=args.max_states,
     )
 
+    # Baseline generation: snapshot the current findings as the accepted set,
+    # then exit cleanly. This runs before --baseline suppression (you record the
+    # full current state) and before the --fail-on gate (writing a baseline must
+    # never break a build). A genuine analysis failure still takes precedence so
+    # we don't persist a baseline built from a half-finished run.
+    if args.write_baseline and not (report.state_limit_exceeded or report.error):
+        from autopsy.baseline import baseline_json
+
+        doc = baseline_json(report.findings, binary=report.binary)
+        if args.write_baseline == "-":
+            print(doc)
+        else:
+            try:
+                with open(args.write_baseline, "w", encoding="utf-8") as fh:
+                    fh.write(doc + "\n")
+            except OSError as exc:
+                print(f"error: cannot write baseline: {exc}", file=sys.stderr)
+                return 1
+            print(
+                f"wrote baseline ({len(report.findings)} finding(s)) to "
+                f"{args.write_baseline}",
+                file=sys.stderr,
+            )
+        return 0
+
+    # Baseline suppression: drop findings whose build-resilient fingerprint is
+    # recorded as accepted. Applied before output and before the --fail-on gate
+    # so suppressed findings affect neither the report nor the exit code.
+    suppressed = 0
+    if args.baseline and not (report.state_limit_exceeded or report.error):
+        from autopsy.baseline import apply_baseline, load_fingerprints
+
+        try:
+            with open(args.baseline, encoding="utf-8") as fh:
+                accepted = load_fingerprints(fh.read())
+        except OSError as exc:
+            print(f"error: cannot read baseline: {exc}", file=sys.stderr)
+            return 1
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        report.findings, suppressed = apply_baseline(report.findings, accepted)
+
     if args.format == "json":
         print(report.to_json())
     elif args.format == "sarif":
         from autopsy.sarif import to_sarif_json
         print(to_sarif_json(report))
+
+    if suppressed:
+        # Keep stdout machine-clean; note the suppression count on stderr so a
+        # human/script can see the baseline did something.
+        print(
+            f"note: suppressed {suppressed} finding(s) via baseline {args.baseline}",
+            file=sys.stderr,
+        )
 
     if report.skipped_checks:
         # Some checks were not run on this target's architecture (e.g. the

@@ -197,3 +197,156 @@ def test_gate_treats_unknown_confidence_as_medium(monkeypatch):
 
     assert cli._gate_tripped([_F()], "medium") is True
     assert cli._gate_tripped([_F()], "high") is False
+
+
+# --- --baseline / --write-baseline finding suppression --------------------
+
+
+def _two_finding_report():
+    rpt = Report(binary="b", checks=[119, 787], max_states=1000)
+    rpt.findings = [
+        Finding(cwe=119, function="store_at", address=0x401000,
+                evidence="oob write", confidence="high"),
+        Finding(cwe=787, function="copy", address=0x401200,
+                evidence="heap overflow", confidence="high"),
+    ]
+    return rpt
+
+
+def test_help_lists_baseline_flags(capsys):
+    parser = cli.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--help"])
+    out = capsys.readouterr().out
+    assert "--baseline" in out
+    assert "--write-baseline" in out
+
+
+def test_baseline_defaults_none():
+    args = cli.build_parser().parse_args(["--binary", "x"])
+    assert args.baseline is None
+    assert args.write_baseline is None
+
+
+def test_write_baseline_to_stdout_then_exit_zero(monkeypatch, capsys):
+    monkeypatch.setattr("autopsy.analyzer.analyze", lambda **kw: _two_finding_report())
+    rc = cli.main(["--binary", "b", "--write-baseline", "-"])
+    assert rc == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["version"] == "1"
+    assert len(doc["findings"]) == 2
+
+
+def test_write_baseline_to_file(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr("autopsy.analyzer.analyze", lambda **kw: _two_finding_report())
+    path = tmp_path / "baseline.json"
+    rc = cli.main(["--binary", "b", "--write-baseline", str(path)])
+    assert rc == 0
+    doc = json.loads(path.read_text())
+    assert len(doc["findings"]) == 2
+    assert "wrote baseline" in capsys.readouterr().err
+
+
+def test_write_baseline_does_not_apply_fail_on(monkeypatch, tmp_path):
+    # Writing a baseline must never break the build even with --fail-on set.
+    monkeypatch.setattr("autopsy.analyzer.analyze", lambda **kw: _two_finding_report())
+    path = tmp_path / "baseline.json"
+    rc = cli.main(["--binary", "b", "--write-baseline", str(path), "--fail-on", "high"])
+    assert rc == 0
+
+
+def test_baseline_suppresses_matching_findings(monkeypatch, tmp_path, capsys):
+    from autopsy.baseline import baseline_json
+
+    # Baseline accepts only the CWE-119 finding.
+    accepted = baseline_json([
+        Finding(cwe=119, function="store_at", address=0x0, evidence="oob write"),
+    ])
+    path = tmp_path / "baseline.json"
+    path.write_text(accepted)
+
+    monkeypatch.setattr("autopsy.analyzer.analyze", lambda **kw: _two_finding_report())
+    rc = cli.main(["--binary", "b", "--baseline", str(path)])
+    assert rc == 0
+    captured = capsys.readouterr()
+    parsed = json.loads(captured.out)
+    # Only the CWE-787 finding survives.
+    assert parsed["finding_count"] == 1
+    assert parsed["findings"][0]["cwe"] == 787
+    assert "suppressed 1 finding" in captured.err
+
+
+def test_baseline_plus_fail_on_only_breaks_on_new_findings(monkeypatch, tmp_path):
+    from autopsy.baseline import baseline_json
+
+    # Accept BOTH findings -> nothing new -> --fail-on must not trip.
+    accepted = baseline_json([
+        Finding(cwe=119, function="store_at", address=0x0, evidence="oob write"),
+        Finding(cwe=787, function="copy", address=0x0, evidence="heap overflow"),
+    ])
+    path = tmp_path / "baseline.json"
+    path.write_text(accepted)
+
+    monkeypatch.setattr("autopsy.analyzer.analyze", lambda **kw: _two_finding_report())
+    rc = cli.main(["--binary", "b", "--baseline", str(path), "--fail-on", "high"])
+    assert rc == 0
+
+
+def test_baseline_fail_on_trips_on_unsuppressed_finding(monkeypatch, tmp_path):
+    from autopsy.baseline import baseline_json
+
+    # Accept only CWE-119; CWE-787 remains -> --fail-on high trips (exit 3).
+    accepted = baseline_json([
+        Finding(cwe=119, function="store_at", address=0x0, evidence="oob write"),
+    ])
+    path = tmp_path / "baseline.json"
+    path.write_text(accepted)
+
+    monkeypatch.setattr("autopsy.analyzer.analyze", lambda **kw: _two_finding_report())
+    rc = cli.main(["--binary", "b", "--baseline", str(path), "--fail-on", "high"])
+    assert rc == 3
+
+
+def test_baseline_missing_file_returns_one(monkeypatch, capsys):
+    monkeypatch.setattr("autopsy.analyzer.analyze", lambda **kw: _two_finding_report())
+    rc = cli.main(["--binary", "b", "--baseline", "/no/such/baseline.json"])
+    assert rc == 1
+    assert "cannot read baseline" in capsys.readouterr().err
+
+
+def test_baseline_invalid_json_returns_one(monkeypatch, tmp_path, capsys):
+    path = tmp_path / "bad.json"
+    path.write_text("not json {{{")
+    monkeypatch.setattr("autopsy.analyzer.analyze", lambda **kw: _two_finding_report())
+    rc = cli.main(["--binary", "b", "--baseline", str(path)])
+    assert rc == 1
+    assert "baseline" in capsys.readouterr().err
+
+
+def test_baseline_not_applied_on_engine_error(monkeypatch, tmp_path):
+    # A genuine analysis failure must take precedence; baseline is skipped and
+    # the engine-error exit code (1) is returned regardless of baseline content.
+    fake = Report(binary="b", checks=[78], max_states=1000, error="angr failed to load")
+    monkeypatch.setattr("autopsy.analyzer.analyze", lambda **kw: fake)
+    path = tmp_path / "baseline.json"
+    path.write_text('{"version":"1","findings":[]}')
+    rc = cli.main(["--binary", "b", "--baseline", str(path)])
+    assert rc == 1
+
+
+def test_baseline_sarif_output_excludes_suppressed(monkeypatch, tmp_path, capsys):
+    from autopsy.baseline import baseline_json
+
+    accepted = baseline_json([
+        Finding(cwe=119, function="store_at", address=0x0, evidence="oob write"),
+    ])
+    path = tmp_path / "baseline.json"
+    path.write_text(accepted)
+
+    monkeypatch.setattr("autopsy.analyzer.analyze", lambda **kw: _two_finding_report())
+    rc = cli.main(["--binary", "b", "--baseline", str(path), "--format", "sarif"])
+    assert rc == 0
+    sarif = json.loads(capsys.readouterr().out)
+    results = sarif["runs"][0]["results"]
+    assert len(results) == 1
+    assert results[0]["ruleId"] == "CWE-787"
