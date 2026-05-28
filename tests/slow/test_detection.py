@@ -70,6 +70,23 @@ def test_cwe415_detected(require_angr, fixtures_dir):
     assert cwe415[0]["confidence"] == "high"
 
 
+def test_cwe415_interproc_detected(require_angr, fixtures_dir):
+    # Single-hop cross-function double-free: run() frees a pointer then passes
+    # it to release() (which frees it again).
+    rep = _analyze(fixtures_dir, "cwe415-interproc-vuln", "415")
+    d = rep.to_dict()
+    assert d["error"] is None
+    cwe415 = [f for f in d["findings"] if f["cwe"] == 415]
+    assert cwe415, f"expected a cross-function CWE-415 finding, got {d['findings']}"
+    # The second free is the callee handoff, reported in the caller (run).
+    interproc = [f for f in cwe415 if f["function"] == "run"]
+    assert interproc, f"expected the double-free reported in run(), got {cwe415}"
+    _assert_finding_contract(interproc[0], 415)
+    # Single-hop interprocedural findings are medium confidence.
+    assert interproc[0]["confidence"] == "medium"
+    assert "release" in interproc[0]["evidence"]
+
+
 def test_cwe416_detected(require_angr, fixtures_dir):
     rep = _analyze(fixtures_dir, "cwe416-vuln", "416")
     d = rep.to_dict()
@@ -174,6 +191,7 @@ def test_max_states_high_completes_all_fixtures(require_angr, fixtures_dir):
         ("cwe119-vuln", 119),
         ("cwe190-vuln", 190),
         ("cwe415-vuln", 415),
+        ("cwe415-interproc-vuln", 415),
         ("cwe416-vuln", 416),
         ("cwe416-interproc-vuln", 416),
         ("cwe78-vuln", 78),

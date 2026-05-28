@@ -153,6 +153,67 @@ autopsy --binary tests/fixtures/cwe190-vuln --checks 190 --format json
 }
 ```
 
+### CWE-415 — double-free (intra-procedural and single-hop interprocedural)
+
+The CWE-415 check runs two passes:
+
+**Intra-procedural.** Within one function body, a pointer is `free`d and then
+`free`d again, with no intervening reallocation of that pointer. Double-free is
+a definitive pattern, so these findings carry `confidence: "high"`.
+
+```bash
+autopsy --binary tests/fixtures/cwe415-vuln --checks 415 --format json
+```
+
+```json
+{
+  "cwe": 415,
+  "function": "main",
+  "address": "0x40117d",
+  "taint_trace": [
+    {"address": "0x...", "description": "allocation via malloc()"},
+    {"address": "0x...", "description": "pointer freed (first free)"},
+    {"address": "0x40117d", "description": "pointer freed again (double-free)"}
+  ],
+  "evidence": "double-free in main: pointer freed at 0x... then freed again at 0x40117d",
+  "confidence": "high"
+}
+```
+
+**Single-hop interprocedural.** Double-free bugs also span a call boundary: a
+caller `G` frees a pointer, then hands that same already-freed pointer to an
+in-binary callee `F` that frees its argument again. autopsy detects this
+single-hop pattern call-graph-driven — `F` frees its incoming parameter, and `G`
+freed the pointer it passes to `F` earlier in its body with no intervening
+reallocation. These cross-function findings carry `confidence: "medium"` (the
+first free and the second free are both confirmed via stack-slot aliasing, but
+the single-hop, parameter-based handoff is a structural match rather than a full
+data-flow proof). This is distinct from the interprocedural CWE-416 pass, where
+the second event is a *dereference* of the freed pointer; here the second event
+is a second `free()` call. Deeper multi-hop chains are intentionally not
+followed, to keep false positives at zero.
+
+```bash
+autopsy --binary tests/fixtures/cwe415-interproc-vuln --checks 415 --format json
+```
+
+```json
+{
+  "cwe": 415,
+  "function": "run",
+  "address": "0x401191",
+  "taint_trace": [
+    {"address": "0x401185", "description": "pointer freed in run via free()"},
+    {"address": "0x401191", "description": "already-freed pointer passed to release(), which frees it again (double-free)"}
+  ],
+  "evidence": "single-hop cross-function double-free: run frees a pointer at 0x401185 then passes it to release() (which frees it again) at 0x401191 with no intervening reallocation",
+  "confidence": "medium"
+}
+```
+
+> Both CWE-415 passes use x86_64 register/stack-slot conventions and run on
+> x86_64 (AMD64) targets only; on AArch64 the register-level checks are skipped.
+
 ### CWE-416 — use-after-free (intra-procedural and single-hop interprocedural)
 
 The CWE-416 check runs two passes:

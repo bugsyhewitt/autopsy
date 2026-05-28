@@ -26,6 +26,7 @@ from __future__ import annotations
 import re
 
 from autopsy.report import Finding, TaintPoint
+from autopsy.checks import cwe415_interproc
 
 # `mov qword ptr [rbp - 8], rax` -> store malloc result to a stack slot.
 _STORE_RAX_TO_SLOT = re.compile(
@@ -44,6 +45,16 @@ def _slot_key(base: str, off: str) -> str:
 
 
 def run(engine) -> list[Finding]:
+    """Run both CWE-415 passes: intra-procedural and single-hop interprocedural.
+
+    The intra-procedural pass (this module) catches the case where both
+    ``free`` calls live in one function body. The interprocedural pass
+    (:mod:`cwe415_interproc`) catches the single-hop cross-function pattern (a
+    pointer freed in the caller, then passed to a callee that frees it again).
+    Findings from both are merged; duplicates at the same finding address are
+    de-duplicated, with the intra-procedural (higher-fidelity) finding taking
+    precedence.
+    """
     cfg = engine.cfg()
     findings: list[Finding] = []
     for func in cfg.kb.functions.values():
@@ -52,6 +63,11 @@ def run(engine) -> list[Finding]:
         finding = _scan_function(engine, func)
         if finding is not None:
             findings.append(finding)
+
+    intra_addrs = {f.address for f in findings}
+    for f in cwe415_interproc.run(engine):
+        if f.address not in intra_addrs:
+            findings.append(f)
     return findings
 
 
