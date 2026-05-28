@@ -106,6 +106,23 @@ specific the gathered evidence is. In SARIF output the confidence maps to
 `result.level` — `high`→`error`, `medium`→`warning`, `low`→`note` — and the raw
 level is preserved in `result.properties.confidence`.
 
+### SARIF output and GitHub Code Scanning
+
+`--format sarif` emits [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/)
+that is ready to upload to GitHub Code Scanning. Each result anchors to the
+analyzed binary as a `physicalLocation.artifactLocation` (required by GitHub —
+results without a file artifact are dropped) while still carrying the precise
+sink `address.absoluteAddress`; results link their rule by `ruleIndex`; and the
+`tool.driver` records `version`/`semanticVersion` so the analyzer build is
+tracked. To surface findings inline on a pull request:
+
+```bash
+autopsy --binary ./target --checks all --format sarif > autopsy.sarif
+gh api --method POST /repos/OWNER/REPO/code-scanning/sarifs \
+  -f commit_sha="$(git rev-parse HEAD)" -f ref="refs/heads/main" \
+  -f sarif="$(gzip -c autopsy.sarif | base64 -w0)"
+```
+
 ### CWE-119 — buffer over-read/write via attacker-controlled offset
 
 A memory access whose *index* is derived from attacker input, with no

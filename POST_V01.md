@@ -49,9 +49,26 @@ and the scope layer gains `"415"` as a valid token.
 
 ---
 
-### 2. SARIF output format (`--format sarif`)
+### 2. SARIF output format (`--format sarif`) ✅ IMPLEMENTED (Rotation 3) — GitHub Code Scanning-ready (Rotation 10)
 
-**What it is:** Add a `--format sarif` output mode that emits
+**Status:** Shipped in Rotation 3, then hardened in Rotation 10 to be directly
+uploadable to **GitHub Code Scanning** (the integration this item's rationale
+explicitly promised). The Rotation 10 changes are all in `autopsy/sarif.py` and
+are angr-free / fully unit-tested: (1) every `result` now carries a
+`physicalLocation.artifactLocation.uri` pointing at the analyzed binary —
+GitHub Code Scanning drops results that lack a file artifact, so the prior
+address-only locations would not have ingested — while still preserving the
+precise `address.absoluteAddress`; (2) each `result` links its rule by
+`ruleIndex` into `tool.driver.rules` (SARIF best practice for reliable rule
+resolution); (3) `tool.driver` records `version`/`semanticVersion` so the
+analyzer build is tracked by consumers; (4) the missing CWE-787 entry was added
+to `_CWE_META`, so OOB-write findings emit a properly named rule
+(name/description/helpUri) instead of the generic `CWE-787` fallback. The README
+gained a "SARIF output and GitHub Code Scanning" section with a `gh api
+.../code-scanning/sarifs` upload recipe. Six new unit tests in
+`tests/unit/test_sarif.py` lock the behavior.
+
+**What it was:** Add a `--format sarif` output mode that emits
 [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html)
 JSON — the Static Analysis Results Interchange Format — alongside the existing
 `--format json`.
