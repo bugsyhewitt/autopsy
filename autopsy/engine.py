@@ -534,6 +534,143 @@ class AngrEngine:
                 slots.add(f"{ml.group(2)}{ml.group(3).replace(' ', '')}")
         return slots
 
+    # printf-family format-string sinks mapped to the SysV/x86_64 register that
+    # carries their *format string* argument. The variadic format argument is
+    # not always the first parameter: fprintf/sprintf/syslog take it second
+    # (after the stream/buffer/priority), snprintf/dprintf third.
+    _FORMAT_SINK_FMT_REG: dict[str, str] = {
+        "printf": "rdi",          # printf(fmt, ...)
+        "vprintf": "rdi",         # vprintf(fmt, va)
+        "fprintf": "rsi",         # fprintf(stream, fmt, ...)
+        "vfprintf": "rsi",        # vfprintf(stream, fmt, va)
+        "sprintf": "rsi",         # sprintf(buf, fmt, ...)
+        "vsprintf": "rsi",        # vsprintf(buf, fmt, va)
+        "snprintf": "rdx",        # snprintf(buf, size, fmt, ...)
+        "vsnprintf": "rdx",       # vsnprintf(buf, size, fmt, va)
+        "dprintf": "rsi",         # dprintf(fd, fmt, ...)
+        "syslog": "rsi",          # syslog(priority, fmt, ...)
+        "vsyslog": "rsi",         # vsyslog(priority, fmt, va)
+        "err": "rsi",             # err(eval, fmt, ...)
+        "warn": "rdi",            # warn(fmt, ...)
+        "errx": "rsi",            # errx(eval, fmt, ...)
+        "warnx": "rdi",           # warnx(fmt, ...)
+    }
+
+    def format_string_sinks_with_nonliteral_format(self) -> list[dict]:
+        """Find printf-family calls whose format argument is not a string literal.
+
+        Detects the CWE-134 uncontrolled-format-string pattern: a call to a
+        printf-family sink where the *format-string* argument register is
+        sourced from a stack slot (a spilled function parameter, or a value
+        loaded from the heap / another variable) rather than being set to the
+        address of a constant string in ``.rodata``.
+
+        A safe call sets the format register with a ``lea reg, [rip + disp]``
+        (PIE/no-PIE rodata pointer) or an immediate address — the format string
+        is a compile-time literal and the variadic argument count is fixed.
+        The vulnerable call instead reloads the format register from a stack
+        slot (``mov reg, [rbp - N]`` / ``[rsp + N]``), which is how -O0 codegen
+        materializes an incoming pointer parameter or a heap-loaded buffer.
+        ``printf(user_input)`` compiles to exactly this shape.
+
+        Each returned dict describes one sink:
+            {
+                "function":    caller function name,
+                "call_address": address of the call instruction,
+                "sink_name":   the printf-family symbol,
+                "fmt_reg":     the format-argument register (e.g. "rdi"),
+                "fmt_slot":    the stack slot the format pointer was loaded from,
+            }
+
+        x86_64 only: the format-argument register mapping uses the SysV calling
+        convention and the slot/aliasing tracking assumes -O0 stack-slot spill
+        conventions. AArch64 register conventions differ, so this returns no
+        sinks on non-AMD64 targets (the caller check is arch-gated upstream).
+        """
+        import re
+
+        if self.project.arch.name != "AMD64":
+            return []
+
+        cfg = self.cfg()
+        call_mnemonics = self._call_mnemonics()
+
+        # reg <- [rbp/rsp +/- N]: a stack-slot reload (non-literal format).
+        load_slot = re.compile(
+            r"^(r[a-z0-9]+),\s*(?:qword ptr )?\[(rbp|rsp)\s*([+\-]\s*(?:0x[0-9a-f]+|\d+))\]$"
+        )
+        # reg <- reg: a register copy (alias propagation).
+        reg_copy = re.compile(r"^(r[a-z0-9]+),\s*(r[a-z0-9]+)$")
+        # reg <- [rip + disp] (lea) or an immediate: a constant rodata pointer.
+        lea_rip = re.compile(r"^(r[a-z0-9]+),\s*(?:qword ptr )?\[rip\s*[+\-]")
+        mov_imm = re.compile(r"^(r[a-z0-9]+),\s*(?:0x[0-9a-f]+|\d+)$")
+
+        results: list[dict] = []
+        for func in cfg.kb.functions.values():
+            if getattr(func, "is_plt", False) or getattr(func, "is_simprocedure", False):
+                continue
+            insns: list[Any] = []
+            for block in func.blocks:
+                try:
+                    insns.extend(block.capstone.insns)
+                except Exception:  # pragma: no cover - defensive
+                    continue
+            insns.sort(key=lambda i: i.address)
+
+            for idx, insn in enumerate(insns):
+                if insn.mnemonic not in call_mnemonics:
+                    continue
+                target = self._resolve_call_target(insn, cfg)
+                fmt_reg = self._FORMAT_SINK_FMT_REG.get(target)
+                if fmt_reg is None:
+                    continue
+
+                # Walk back from the call resolving how the format register was
+                # last set. Track the set of registers currently aliasing the
+                # format register so a `mov fmt_reg, rax; mov rax, [slot]`
+                # sequence is followed correctly.
+                fmt_aliases: set[str] = {fmt_reg}
+                fmt_slot: str | None = None
+                literal = False
+                for prev in reversed(insns[max(0, idx - 12): idx]):
+                    if prev.mnemonic == "lea":
+                        ml = lea_rip.match(prev.op_str)
+                        if ml and ml.group(1) in fmt_aliases:
+                            literal = True
+                            break
+                    if prev.mnemonic == "mov":
+                        # lea-style not used, but a direct immediate address.
+                        mi = mov_imm.match(prev.op_str)
+                        if mi and mi.group(1) in fmt_aliases:
+                            literal = True
+                            break
+                        ms = load_slot.match(prev.op_str)
+                        if ms and ms.group(1) in fmt_aliases:
+                            fmt_slot = f"{ms.group(2)}{ms.group(3).replace(' ', '')}"
+                            break
+                        mc = reg_copy.match(prev.op_str)
+                        if mc and mc.group(1) in fmt_aliases:
+                            # dest aliases the format reg; its source now does too.
+                            fmt_aliases.add(mc.group(2))
+                            continue
+
+                if literal or fmt_slot is None:
+                    # Either a confirmed string literal, or we could not prove
+                    # the format came from a stack slot — stay conservative and
+                    # do not flag (zero-false-positive guarantee).
+                    continue
+
+                results.append(
+                    {
+                        "function": func.name,
+                        "call_address": insn.address,
+                        "sink_name": target,
+                        "fmt_reg": fmt_reg,
+                        "fmt_slot": fmt_slot,
+                    }
+                )
+        return results
+
     def _resolve_call_target(self, insn: Any, cfg: Any) -> str | None:
         """Resolve a call instruction's target to a symbol name if possible.
 

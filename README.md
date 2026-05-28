@@ -45,7 +45,7 @@ autopsy --version
 ## Usage
 
 ```
-autopsy --binary PATH [--checks {119,190,416,78,all}] [--max-states N] [--format json]
+autopsy --binary PATH [--checks {119,190,415,416,78,134,787,all}] [--max-states N] [--format json|sarif]
 ```
 
 | Flag | Default | Meaning |
@@ -61,23 +61,23 @@ Exit codes: `0` clean run, `1` engine/load error, `2` state-limit exceeded.
 
 | Architecture | Checks that run |
 |---|---|
-| **x86_64 (AMD64)** | all checks (CWE-119, 190, 415, 416, 78, 787) |
+| **x86_64 (AMD64)** | all checks (CWE-119, 190, 415, 416, 78, 134, 787) |
 | **AArch64 (ARM64)** | the call-site-driven checks: **CWE-78** and **CWE-190** |
 
-On an AArch64 target, the register-level checks (CWE-119/415/416/787) rely on
+On an AArch64 target, the register-level checks (CWE-119/415/416/134/787) rely on
 x86_64 register conventions, so they are **skipped** rather than producing
 unsound results. Skipped checks are listed in the report's `skipped_checks`
 array and noted on stderr:
 
 ```bash
 autopsy --binary ./arm64-target --checks all
-# stderr: note: skipped CWE-119, CWE-415, CWE-416, CWE-787 (not supported on this target's architecture)
+# stderr: note: skipped CWE-119, CWE-415, CWE-416, CWE-134, CWE-787 (not supported on this target's architecture)
 ```
 
 ```json
 {
-  "checks": [119, 190, 415, 416, 78, 787],
-  "skipped_checks": [119, 415, 416, 787],
+  "checks": [119, 190, 415, 416, 78, 134, 787],
+  "skipped_checks": [119, 415, 416, 134, 787],
   "findings": [ /* CWE-78 / CWE-190 findings */ ]
 }
 ```
@@ -96,9 +96,9 @@ autopsy --binary ./target --checks all --max-states 1000  # completes
 
 ---
 
-## The four CWE classes
+## The CWE classes
 
-autopsy v0.1 detects four whole-program-analysis-required vulnerability
+autopsy detects a set of whole-program-analysis-required vulnerability
 classes. Each finding carries `cwe`, `function`, `address`, `taint_trace` (an
 array of program points showing the data flow), `evidence`, and a
 `confidence` triage level (`"high"` / `"medium"` / `"low"`) computed from how
@@ -294,6 +294,48 @@ autopsy --binary tests/fixtures/cwe78-vuln --checks 78 --format json
 }
 ```
 
+### CWE-134 — uncontrolled (externally-controlled) format string
+
+A printf-family call (`printf`/`fprintf`/`sprintf`/`snprintf`/`syslog` and the
+`v*` variants) whose *format-string* argument is **not** a compile-time string
+literal — the format register is reloaded from a stack slot (a spilled function
+parameter, or a value loaded from the heap / another variable) rather than set
+to a constant `.rodata` pointer. The classic pattern is `printf(user_input)`,
+where the attacker controls the format string and can inject `%x`/`%n`/`%s`
+specifiers to leak or corrupt memory.
+
+A finding requires both halves of the data flow: a non-literal format sink
+**and** at least one attacker-controlled input source (`fgets`/`read`/`scanf`/…)
+in the program. Benign `printf("hello %s\n", name)` uses a literal format (a
+`lea` rodata pointer) and is never flagged; the check holds the
+zero-false-positive line on the clean baseline. Because the analysis confirms a
+non-literal format register sourced from a stack slot plus a program-wide input
+source — but does not prove a register-level def-use chain from the specific
+read to the specific format slot — these findings carry `confidence: "medium"`.
+
+```bash
+autopsy --binary tests/fixtures/cwe134-vuln --checks 134 --format json
+```
+
+```json
+{
+  "cwe": 134,
+  "function": "emit",
+  "address": "0x401188",
+  "taint_trace": [
+    {"address": "0x4011ab", "description": "attacker-controlled input read via fgets()"},
+    {"address": "0x401188", "description": "non-literal format string (rdi reloaded from stack slot rbp-8) reaches printf()"}
+  ],
+  "evidence": "printf() in emit called with a non-literal format string (format argument rdi loaded from rbp-8, not a constant) while the program reads input via fgets() — externally-controlled format string",
+  "confidence": "medium"
+}
+```
+
+> The CWE-134 check uses x86_64 SysV register/stack-slot conventions (the
+> format argument register varies by sink: `rdi` for `printf`, `rsi` for
+> `fprintf`/`sprintf`/`syslog`, `rdx` for `snprintf`) and runs on x86_64
+> (AMD64) targets only; on AArch64 the register-level checks are skipped.
+
 ---
 
 ## How it relates to `blight`
@@ -339,9 +381,10 @@ regeneration. See `tests/fixtures/REGENERATE.md`.
 - No bare-metal / firmware targets.
 - No symbolic execution to PoC input generation.
 - No performance optimization pass.
-- No CWE classes beyond the four above.
+- No CWE classes beyond those documented above.
 
-These are deliberate v0.1 boundaries.
+These are deliberate v0.1 boundaries (the CWE class list has since grown in
+Phase 2 — see [The CWE classes](#the-cwe-classes)).
 
 ---
 

@@ -48,10 +48,10 @@ def test_analyze_all_runs_every_check(monkeypatch):
     seen = []
     monkeypatch.setattr(
         "autopsy.checks.CHECKS",
-        {c: (lambda e, c=c: (seen.append(c) or [])) for c in (119, 190, 415, 416, 78, 787)},
+        {c: (lambda e, c=c: (seen.append(c) or [])) for c in (119, 190, 415, 416, 78, 134, 787)},
     )
     rep = analyzer.analyze("bin", "all", engine_factory=_fake_factory)
-    assert seen == [119, 190, 415, 416, 78, 787]
+    assert seen == [119, 190, 415, 416, 78, 134, 787]
     assert rep.findings == []
 
 
@@ -86,7 +86,7 @@ def test_analyze_skips_unsupported_arch_checks(monkeypatch):
     seen = []
     monkeypatch.setattr(
         "autopsy.checks.CHECKS",
-        {c: (lambda e, c=c: (seen.append(c) or [])) for c in (119, 190, 415, 416, 78, 787)},
+        {c: (lambda e, c=c: (seen.append(c) or [])) for c in (119, 190, 415, 416, 78, 134, 787)},
     )
     rep = analyzer.analyze(
         "bin", "all",
@@ -95,8 +95,8 @@ def test_analyze_skips_unsupported_arch_checks(monkeypatch):
     # Only the arch-agnostic checks actually ran.
     assert seen == [190, 78]
     # The skipped register-level checks are recorded on the report.
-    assert rep.skipped_checks == [119, 415, 416, 787]
-    assert rep.to_dict()["skipped_checks"] == [119, 415, 416, 787]
+    assert rep.skipped_checks == [119, 415, 416, 134, 787]
+    assert rep.to_dict()["skipped_checks"] == [119, 415, 416, 134, 787]
 
 
 def test_analyze_no_partition_method_runs_all(monkeypatch):
@@ -105,10 +105,10 @@ def test_analyze_no_partition_method_runs_all(monkeypatch):
     seen = []
     monkeypatch.setattr(
         "autopsy.checks.CHECKS",
-        {c: (lambda e, c=c: (seen.append(c) or [])) for c in (119, 190, 415, 416, 78, 787)},
+        {c: (lambda e, c=c: (seen.append(c) or [])) for c in (119, 190, 415, 416, 78, 134, 787)},
     )
     rep = analyzer.analyze("bin", "all", engine_factory=_fake_factory)
-    assert seen == [119, 190, 415, 416, 78, 787]
+    assert seen == [119, 190, 415, 416, 78, 134, 787]
     assert rep.skipped_checks == []
 
 

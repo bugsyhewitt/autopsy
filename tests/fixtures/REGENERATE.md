@@ -13,6 +13,7 @@ run without a compiler. This file documents how to regenerate them if needed.
 | `cwe416-vuln.c` / `cwe416-vuln` | source + binary: intra-procedural use-after-free |
 | `cwe416-interproc-vuln.c` / `cwe416-interproc-vuln` | source + binary: single-hop **interprocedural** use-after-free (free in callee, use in caller) |
 | `cwe78-vuln.c` / `cwe78-vuln` | source + binary: OS command injection into `system()` |
+| `cwe134-vuln.c` / `cwe134-vuln` | source + binary: uncontrolled format string (`printf(user_input)`); the safe `log_line()` uses a literal format and must not be flagged |
 | `cwe78-aarch64-vuln.c` + `cwe78-aarch64-stubs.c` / `cwe78-aarch64-vuln` | source + binary: **AArch64** OS command injection (exercises ARM64 support) |
 | `clean-baseline.c` / `clean-baseline` | source + binary: none of the four classes (zero-false-positive check) |
 | `Makefile` | build rules |

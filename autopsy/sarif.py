@@ -71,6 +71,11 @@ _CWE_META: dict[int, dict[str, str]] = {
         "short": "Use After Free",
         "uri": "https://cwe.mitre.org/data/definitions/416.html",
     },
+    134: {
+        "name": "Use of Externally-Controlled Format String",
+        "short": "Uncontrolled Format String",
+        "uri": "https://cwe.mitre.org/data/definitions/134.html",
+    },
 }
 
 

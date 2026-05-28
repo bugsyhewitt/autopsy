@@ -139,6 +139,27 @@ def test_cwe787_detected(require_angr, fixtures_dir):
     assert cwe787[0]["confidence"] == "medium"
 
 
+def test_cwe134_detected(require_angr, fixtures_dir):
+    # Uncontrolled format string: emit() passes attacker-controlled input
+    # straight to printf() as the format string (printf(user_input)).
+    rep = _analyze(fixtures_dir, "cwe134-vuln", "134")
+    d = rep.to_dict()
+    assert d["error"] is None
+    cwe134 = [f for f in d["findings"] if f["cwe"] == 134]
+    assert cwe134, f"expected a CWE-134 finding, got {d['findings']}"
+    # The vulnerable sink lives in emit(); the safe log_line() (literal format)
+    # must not be flagged.
+    vuln = [f for f in cwe134 if f["function"] == "emit"]
+    assert vuln, f"expected the format-string finding in emit(), got {cwe134}"
+    assert all(f["function"] != "log_line" for f in cwe134), (
+        f"the literal-format printf in log_line must not be flagged, got {cwe134}"
+    )
+    _assert_finding_contract(vuln[0], 134)
+    # Non-literal-format + global-source heuristic -> medium confidence.
+    assert vuln[0]["confidence"] == "medium"
+    assert "printf" in vuln[0]["evidence"]
+
+
 def test_cwe78_detected_on_aarch64(require_angr, fixtures_dir):
     # AArch64 (ARM64) support: the call-site-driven CWE-78 check must fire on a
     # `bl` (branch-with-link) call to system() fed by an fgets() source, exactly
@@ -159,7 +180,7 @@ def test_aarch64_skips_register_level_checks(require_angr, fixtures_dir):
     rep = _analyze(fixtures_dir, "cwe78-aarch64-vuln", "all")
     d = rep.to_dict()
     assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
-    assert set(d["skipped_checks"]) == {119, 415, 416, 787}
+    assert set(d["skipped_checks"]) == {119, 415, 416, 134, 787}
     # The CWE-78 finding still surfaces under "all".
     assert any(f["cwe"] == 78 for f in d["findings"])
 
@@ -195,6 +216,7 @@ def test_max_states_high_completes_all_fixtures(require_angr, fixtures_dir):
         ("cwe416-vuln", 416),
         ("cwe416-interproc-vuln", 416),
         ("cwe78-vuln", 78),
+        ("cwe134-vuln", 134),
         ("cwe787-vuln", 787),
     ]:
         rep = analyze(binary=str(fixtures_dir / name), checks_token=str(cwe),

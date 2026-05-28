@@ -215,6 +215,30 @@ for and is simpler to triage against.)
 
 ---
 
+### Additional shipped detector — Uncontrolled format string (CWE-134) ✅ IMPLEMENTED
+
+**Status:** Shipped. A new CWE-134 (Use of Externally-Controlled Format String)
+check detects printf-family calls (`printf`/`fprintf`/`sprintf`/`snprintf`/
+`syslog` and the `v*`/`err`/`warn` variants) whose *format-string* argument is
+not a compile-time string literal — the engine helper
+(`AngrEngine.format_string_sinks_with_nonliteral_format`) walks back from each
+sink and confirms the format-argument register (SysV: `rdi` for `printf`, `rsi`
+for `fprintf`/`sprintf`/`syslog`, `rdx` for `snprintf`) is reloaded from a stack
+slot rather than set via a `lea reg, [rip+disp]` rodata pointer or an immediate
+address. The classic `printf(user_input)` pattern compiles to exactly this
+shape. The check (`autopsy/checks/cwe134.py`) requires both a non-literal format
+sink and at least one attacker-controlled input source in the program (the same
+`_SOURCES` set as CWE-78), and reports `confidence: "medium"` — the non-literal
+format is a tight structural signal but the analysis does not prove a
+register-level def-use chain from the specific read to the format slot. x86_64
+only (register-level; skipped on AArch64). A fixture `tests/fixtures/cwe134-vuln`
+exercises the vulnerable `printf(user)` and a safe literal-format companion that
+must not fire. CWE-134 is rank #25 region of the historical CWE Top 25 and a
+staple of the printf-family weakness class; full VEX-IR source→format taint is
+the post-v0.1 deepening (see Tier 3 item #9).
+
+---
+
 ## Tier 3 — Later / harder / lower near-term value
 
 ### 7. PE (Windows) binary support
