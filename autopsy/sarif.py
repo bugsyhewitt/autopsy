@@ -29,6 +29,10 @@ from typing import Any
 from autopsy import __version__ as _AUTOPSY_VERSION
 from autopsy.report import Report
 
+# Canonical CWE catalog lives in :mod:`autopsy.scope` (single source of truth
+# shared with ``--list-checks``); aliased here so local references are unchanged.
+from autopsy.scope import CWE_CATALOG as _CWE_META
+
 # SARIF 2.1.0 schema URI (informational; not fetched at runtime).
 _SARIF_SCHEMA = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
 _SARIF_VERSION = "2.1.0"
@@ -44,46 +48,6 @@ _CWE_TAXONOMY = {
     "guid": _CWE_TAXONOMY_GUID,
     "isComprehensive": False,
 }
-
-# Human-readable descriptions for each CWE autopsy currently supports.
-_CWE_META: dict[int, dict[str, str]] = {
-    78: {
-        "name": "Improper Neutralization of Special Elements used in an OS Command",
-        "short": "OS Command Injection",
-        "uri": "https://cwe.mitre.org/data/definitions/78.html",
-    },
-    119: {
-        "name": "Improper Restriction of Operations within the Bounds of a Memory Buffer",
-        "short": "Buffer Overflow",
-        "uri": "https://cwe.mitre.org/data/definitions/119.html",
-    },
-    190: {
-        "name": "Integer Overflow or Wraparound",
-        "short": "Integer Overflow",
-        "uri": "https://cwe.mitre.org/data/definitions/190.html",
-    },
-    415: {
-        "name": "Double Free",
-        "short": "Double Free",
-        "uri": "https://cwe.mitre.org/data/definitions/415.html",
-    },
-    416: {
-        "name": "Use After Free",
-        "short": "Use After Free",
-        "uri": "https://cwe.mitre.org/data/definitions/416.html",
-    },
-    134: {
-        "name": "Use of Externally-Controlled Format String",
-        "short": "Uncontrolled Format String",
-        "uri": "https://cwe.mitre.org/data/definitions/134.html",
-    },
-    787: {
-        "name": "Out-of-bounds Write",
-        "short": "Out-of-bounds Write",
-        "uri": "https://cwe.mitre.org/data/definitions/787.html",
-    },
-}
-
 
 def _rule_for_cwe(cwe: int) -> dict[str, Any]:
     """Build a SARIF ``reportingDescriptor`` (rule) entry for a CWE id."""

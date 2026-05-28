@@ -47,20 +47,64 @@ autopsy --version
 ```
 autopsy --binary PATH [--checks {119,190,415,416,78,134,787,all}] [--max-states N]
         [--format json|sarif] [--fail-on LEVEL] [--baseline PATH] [--write-baseline PATH]
+autopsy --list-checks [--format json]
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--binary PATH` | (required) | the ELF binary to analyze |
+| `--binary PATH` | (required) | the ELF binary to analyze (not required with `--list-checks`) |
 | `--checks` | `all` | which CWE check(s) to run |
 | `--max-states N` | `1000` | angr resource cap: max cumulative symbolic states before aborting |
 | `--format` | `json` | output format |
 | `--fail-on LEVEL` | `never` | exit non-zero (code `3`) when findings at or above this confidence are present — for CI/CD build gating |
 | `--baseline PATH` | (none) | suppress findings recorded as accepted in this baseline file (build-resilient fingerprints) |
 | `--write-baseline PATH` | (none) | write the current run's findings to PATH as a baseline (then exit `0`); `-` writes to stdout |
+| `--list-checks` | (off) | list the available CWE detectors and exit (offline; no binary or angr needed) |
 
 Exit codes: `0` clean run, `1` engine/load error, `2` state-limit exceeded,
 `3` findings gate tripped (`--fail-on`).
+
+### Discovering the detectors with `--list-checks`
+
+`--list-checks` enumerates the CWE detectors autopsy ships, then exits `0`. It is
+an **offline catalog query**: it never loads angr and never needs a `--binary`,
+so it is safe to run anywhere (including in a container that hasn't fetched a
+target yet) to discover what `--checks` tokens are available.
+
+```bash
+autopsy --list-checks
+# autopsy 0.1.0 — available CWE detectors:
+#
+#   CWE-119  Buffer Overflow
+#            --checks 119   https://cwe.mitre.org/data/definitions/119.html
+#   ... (one block per detector) ...
+#
+# Run all detectors with --checks all (the default).
+```
+
+For tooling, `--format json` emits a machine-readable catalog — one object per
+detector with its `cwe` id, the `token` to pass to `--checks`, a `short` label,
+the full MITRE `name`, and the definition `uri`:
+
+```bash
+autopsy --list-checks --format json
+# {
+#   "checks": [
+#     {
+#       "cwe": 119,
+#       "token": "119",
+#       "short": "Buffer Overflow",
+#       "name": "Improper Restriction of Operations within the Bounds of a Memory Buffer",
+#       "uri": "https://cwe.mitre.org/data/definitions/119.html"
+#     },
+#     ...
+#   ]
+# }
+```
+
+The catalog is the single source of truth shared with the SARIF rule
+descriptions, so `--list-checks` always reflects exactly what an analysis run
+can detect.
 
 ### CI/CD build gating with `--fail-on`
 

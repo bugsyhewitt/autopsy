@@ -8,10 +8,11 @@ arguments never touches angr.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 
 from autopsy import __version__
-from autopsy.scope import VALID_TOKENS
+from autopsy.scope import VALID_TOKENS, list_checks
 
 # Exit code returned when --fail-on is satisfied by the findings. Chosen to not
 # collide with the existing contract: 0 = clean, 1 = engine error, 2 = state
@@ -55,11 +56,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         epilog="Ethical use only: analyze binaries you own or are authorized to assess.",
     )
+    # --binary is required for analysis but NOT for --list-checks (which is an
+    # offline catalog query). argparse can't express "required unless other
+    # flag", so it's validated manually in main() after parsing.
     parser.add_argument(
         "--binary",
-        required=True,
         metavar="PATH",
-        help="path to the target ELF binary to analyze",
+        help="path to the target ELF binary to analyze (required unless --list-checks)",
     )
     parser.add_argument(
         "--checks",
@@ -112,6 +115,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--list-checks",
+        action="store_true",
+        help=(
+            "list the available CWE detectors and exit (offline; no --binary "
+            "required). Honors --format: text (default) or json for tooling"
+        ),
+    )
+    parser.add_argument(
         "--version",
         action="version",
         version=f"autopsy {__version__}",
@@ -119,9 +130,48 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _render_list_checks(fmt: str) -> str:
+    """Render the CWE detector catalog as text or JSON.
+
+    ``json`` emits ``{"checks": [...]}`` (each entry carries cwe/token/short/
+    name/uri) for pipeline consumption. ``text`` (and any non-json value) emits
+    a human-readable table. angr-free: drives entirely off the static catalog.
+    """
+    checks = list_checks()
+    if fmt == "json":
+        return json.dumps({"checks": checks}, indent=2)
+    lines = [f"autopsy {__version__} — available CWE detectors:", ""]
+    for c in checks:
+        # token is the value to pass to --checks; left-pad so the column aligns.
+        lines.append(f"  CWE-{c['cwe']:<3}  {c['short']}")
+        lines.append(f"           --checks {c['token']}   {c['uri']}")
+    lines.append("")
+    lines.append("Run all detectors with --checks all (the default).")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # --list-checks is an offline catalog query: handle it before requiring a
+    # binary and before importing the (angr-backed) analyzer, so it stays fast
+    # and works with no target. It defaults to human-readable text; --format
+    # json is honored only when the user explicitly asks for it (the analysis
+    # path's json default must not silently force JSON onto the catalog).
+    if args.list_checks:
+        argv_tokens = sys.argv[1:] if argv is None else argv
+        explicit_format = "--format" in argv_tokens or any(
+            t.startswith("--format=") for t in argv_tokens
+        )
+        fmt = args.format if explicit_format else "text"
+        print(_render_list_checks(fmt))
+        return 0
+
+    # --binary is required for any analysis run. argparse can't express
+    # "required unless --list-checks", so enforce it here.
+    if not args.binary:
+        parser.error("--binary is required (or use --list-checks)")
 
     # Import the driver lazily so --help stays angr-free and instant.
     from autopsy.analyzer import analyze
