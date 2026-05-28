@@ -56,7 +56,17 @@ def analyze(
         pass_fn = getattr(engine, "reachability_pass", None)
         if callable(pass_fn):
             pass_fn()
-        for cwe in cwes:
+        # Partition the requested checks by architecture support. On x86_64 all
+        # run; on AArch64 only the call-site-driven checks (CWE-78/190) run and
+        # the register-level checks are skipped (recorded, not silently dropped).
+        # Unit-test engines without this method run every requested check.
+        partition = getattr(engine, "checks_supported_on_arch", None)
+        if callable(partition):
+            runnable, skipped = partition(cwes)
+            report.skipped_checks = skipped
+        else:
+            runnable = cwes
+        for cwe in runnable:
             check = CHECKS[cwe]
             findings.extend(check(engine))
     except StateLimitExceeded as exc:

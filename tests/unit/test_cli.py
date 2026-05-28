@@ -62,6 +62,19 @@ def test_main_state_limit_returns_two(monkeypatch, capsys):
     assert "state limit exceeded" in err
 
 
+def test_main_notes_skipped_checks_on_stderr(monkeypatch, capsys):
+    fake = Report(binary="b", checks=[119, 78], max_states=1000)
+    fake.skipped_checks = [119]
+    monkeypatch.setattr("autopsy.analyzer.analyze", lambda **kw: fake)
+    rc = cli.main(["--binary", "b", "--checks", "all"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    # stdout stays machine-clean JSON; the note goes to stderr.
+    json.loads(captured.out)
+    assert "CWE-119" in captured.err
+    assert "architecture" in captured.err
+
+
 def test_main_engine_error_returns_one(monkeypatch):
     fake = Report(binary="b", checks=[78], max_states=1000, error="angr failed to load")
     monkeypatch.setattr("autopsy.analyzer.analyze", lambda **kw: fake)

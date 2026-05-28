@@ -12,6 +12,7 @@ run without a compiler. This file documents how to regenerate them if needed.
 | `cwe190-vuln.c` / `cwe190-vuln` | source + binary: integer overflow into allocator size |
 | `cwe416-vuln.c` / `cwe416-vuln` | source + binary: intra-procedural use-after-free |
 | `cwe78-vuln.c` / `cwe78-vuln` | source + binary: OS command injection into `system()` |
+| `cwe78-aarch64-vuln.c` + `cwe78-aarch64-stubs.c` / `cwe78-aarch64-vuln` | source + binary: **AArch64** OS command injection (exercises ARM64 support) |
 | `clean-baseline.c` / `clean-baseline` | source + binary: none of the four classes (zero-false-positive check) |
 | `Makefile` | build rules |
 
@@ -53,3 +54,32 @@ pytest -m slow
 - If you change a `.c` file, keep the vulnerability pattern intact: the CWE-416
   fixture in particular **must remain intra-procedural** (malloc, free, and use
   in the same function with no calls between free and use).
+
+## AArch64 (ARM64) fixture
+
+`cwe78-aarch64-vuln` exercises autopsy's AArch64 support — the call-site-driven
+CWE-78 check firing on a `bl` (branch-with-link) call to `system()`. Because the
+host is x86_64 (no AArch64 libc/sysroot), it is built **freestanding** and linked
+statically with stub libc/runtime symbols (`cwe78-aarch64-stubs.c`).
+
+Toolchain:
+
+- **Compiler:** `clang` with `--target=aarch64-linux-gnu` (the bundled LLVM
+  AArch64 backend; no cross-gcc or sysroot required)
+- **Linker:** `ld.lld`
+- **Flags:** `-ffreestanding -fno-stack-protector -O0 -g`
+
+Regenerate just this fixture from this directory:
+
+```bash
+make aarch64
+```
+
+The detection signal is purely the presence and resolvable symbol names of the
+`bl` call sites in `run_cmd()`; the stub bodies are irrelevant. Verify with:
+
+```bash
+llvm-objdump -d cwe78-aarch64-vuln | grep -A14 '<run_cmd>:'
+```
+
+You should see `bl ... <fgets>` followed by `bl ... <system>`.

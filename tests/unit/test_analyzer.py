@@ -67,6 +67,51 @@ def test_analyze_propagates_state_limit(monkeypatch):
     assert "state limit exceeded" in rep.error
 
 
+class ArchAwareFakeEngine(FakeEngine):
+    """FakeEngine that reports an architecture-driven check partition.
+
+    Emulates an AArch64 engine: only the call-site-driven checks (78, 190) run;
+    the register-level checks are reported as skipped.
+    """
+
+    _RUNNABLE = (78, 190)
+
+    def checks_supported_on_arch(self, cwes):
+        runnable = [c for c in cwes if c in self._RUNNABLE]
+        skipped = [c for c in cwes if c not in self._RUNNABLE]
+        return runnable, skipped
+
+
+def test_analyze_skips_unsupported_arch_checks(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        "autopsy.checks.CHECKS",
+        {c: (lambda e, c=c: (seen.append(c) or [])) for c in (119, 190, 415, 416, 78, 787)},
+    )
+    rep = analyzer.analyze(
+        "bin", "all",
+        engine_factory=lambda b, m: ArchAwareFakeEngine(b, m),
+    )
+    # Only the arch-agnostic checks actually ran.
+    assert seen == [190, 78]
+    # The skipped register-level checks are recorded on the report.
+    assert rep.skipped_checks == [119, 415, 416, 787]
+    assert rep.to_dict()["skipped_checks"] == [119, 415, 416, 787]
+
+
+def test_analyze_no_partition_method_runs_all(monkeypatch):
+    # A plain engine without checks_supported_on_arch runs every requested check
+    # and reports no skipped checks (back-compat for unit-test engines).
+    seen = []
+    monkeypatch.setattr(
+        "autopsy.checks.CHECKS",
+        {c: (lambda e, c=c: (seen.append(c) or [])) for c in (119, 190, 415, 416, 78, 787)},
+    )
+    rep = analyzer.analyze("bin", "all", engine_factory=_fake_factory)
+    assert seen == [119, 190, 415, 416, 78, 787]
+    assert rep.skipped_checks == []
+
+
 def test_analyze_handles_engine_load_error(monkeypatch):
     from autopsy.engine import EngineError
 

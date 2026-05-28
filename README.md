@@ -14,7 +14,9 @@ about the *whole program*: call-graph reachability, data flow from
 attacker-controlled sources to dangerous sinks, and intra-procedural pointer
 lifetimes. It is slower and deeper by design.
 
-> **Scope (v0.1):** ELF / x86_64 only. Four CWE classes. See
+> **Scope:** ELF only. Full check coverage on x86_64; the call-site-driven
+> checks (CWE-78, CWE-190) also run on AArch64. See
+> [Architecture support](#architecture-support) and
 > [What autopsy is not](#what-autopsy-is-not).
 
 ---
@@ -53,6 +55,34 @@ autopsy --binary PATH [--checks {119,190,416,78,all}] [--max-states N] [--format
 | `--format` | `json` | output format |
 
 Exit codes: `0` clean run, `1` engine/load error, `2` state-limit exceeded.
+
+### Architecture support
+
+| Architecture | Checks that run |
+|---|---|
+| **x86_64 (AMD64)** | all checks (CWE-119, 190, 415, 416, 78, 787) |
+| **AArch64 (ARM64)** | the call-site-driven checks: **CWE-78** and **CWE-190** |
+
+On an AArch64 target, the register-level checks (CWE-119/415/416/787) rely on
+x86_64 register conventions, so they are **skipped** rather than producing
+unsound results. Skipped checks are listed in the report's `skipped_checks`
+array and noted on stderr:
+
+```bash
+autopsy --binary ./arm64-target --checks all
+# stderr: note: skipped CWE-119, CWE-415, CWE-416, CWE-787 (not supported on this target's architecture)
+```
+
+```json
+{
+  "checks": [119, 190, 415, 416, 78, 787],
+  "skipped_checks": [119, 415, 416, 787],
+  "findings": [ /* CWE-78 / CWE-190 findings */ ]
+}
+```
+
+Other architectures and binary formats are rejected at load time with a clear
+error.
 
 The `--max-states` cap governs the symbolic reachability pass. A small value
 aborts analysis with a `state limit exceeded` message; the default completes
@@ -209,7 +239,8 @@ regeneration. See `tests/fixtures/REGENERATE.md`.
 ## What autopsy is not (v0.1)
 
 - No PE binary support (ELF only).
-- No architectures beyond x86_64.
+- No architectures beyond x86_64 and AArch64 (and AArch64 runs the
+  call-site-driven checks only — see [Architecture support](#architecture-support)).
 - No bare-metal / firmware targets.
 - No symbolic execution to PoC input generation.
 - No performance optimization pass.
