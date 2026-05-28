@@ -225,3 +225,79 @@ def test_caller_use_after_intervening_call_not_reported():
 def test_caller_use_returns_none_for_unknown_caller():
     eng = _engine([_free_plt(), _release_func(), _run_func()])
     assert eng.caller_uses_arg_after_call("ghost", 0x401234) is None
+
+
+# ---------------------------------------------------------------------------
+# caller_frees_arg_before_call (single-hop interprocedural CWE-415)
+# ---------------------------------------------------------------------------
+#
+# These synthetic streams mirror the -O0 x86_64 codegen of the
+# cwe415-interproc-vuln fixture's run():
+#
+#     call malloc ; mov [rbp-8], rax
+#     mov rax,[rbp-8] ; mov rdi,rax ; call free      <- first free (caller)
+#     mov rax,[rbp-8] ; mov rdi,rax ; call release   <- second free (callee)
+
+MALLOC_ADDR = 0x401040
+DF_RUN_ADDR = 0x401151
+
+
+def _malloc_plt():
+    return _Func(MALLOC_ADDR, "malloc", [], is_plt=True)
+
+
+def _df_run_func(realloc_between=False, freed_first=True):
+    """run(): mallocs p, (optionally) frees p, then passes p to release()."""
+    insns = [
+        _Insn(DF_RUN_ADDR + 0x8, "call", hex(MALLOC_ADDR)),
+        _Insn(DF_RUN_ADDR + 0xD, "mov", "qword ptr [rbp - 8], rax"),
+    ]
+    if freed_first:
+        insns += [
+            _Insn(DF_RUN_ADDR + 0x1D, "mov", "rax, qword ptr [rbp - 8]"),
+            _Insn(DF_RUN_ADDR + 0x21, "mov", "rdi, rax"),
+            _Insn(DF_RUN_ADDR + 0x24, "call", hex(FREE_ADDR)),  # FIRST free
+        ]
+    if realloc_between:
+        insns += [
+            _Insn(DF_RUN_ADDR + 0x29, "call", hex(MALLOC_ADDR)),
+            _Insn(DF_RUN_ADDR + 0x2E, "mov", "qword ptr [rbp - 8], rax"),  # realloc slot
+        ]
+    insns += [
+        _Insn(DF_RUN_ADDR + 0x39, "mov", "rax, qword ptr [rbp - 8]"),
+        _Insn(DF_RUN_ADDR + 0x3D, "mov", "rdi, rax"),
+        _Insn(DF_RUN_ADDR + 0x40, "call", hex(RELEASE_ADDR)),  # SECOND free (callee)
+    ]
+    return _Func(DF_RUN_ADDR, "run", insns)
+
+
+DF_FIRST_FREE_ADDR = DF_RUN_ADDR + 0x24
+DF_RELEASE_CALL_ADDR = DF_RUN_ADDR + 0x40
+
+
+def test_caller_freed_arg_before_handoff_detected():
+    eng = _engine([_free_plt(), _malloc_plt(), _release_func(), _df_run_func()])
+    addr = eng.caller_frees_arg_before_call("run", DF_RELEASE_CALL_ADDR)
+    assert addr == DF_FIRST_FREE_ADDR
+
+
+def test_caller_did_not_free_first_returns_none():
+    eng = _engine(
+        [_free_plt(), _malloc_plt(), _release_func(), _df_run_func(freed_first=False)]
+    )
+    assert eng.caller_frees_arg_before_call("run", DF_RELEASE_CALL_ADDR) is None
+
+
+def test_reallocation_between_frees_cancels_candidate():
+    # The slot is reallocated after the first free, so the second free targets
+    # fresh memory — not a double-free. Conservative: return None.
+    eng = _engine(
+        [_free_plt(), _malloc_plt(), _release_func(),
+         _df_run_func(realloc_between=True)]
+    )
+    assert eng.caller_frees_arg_before_call("run", DF_RELEASE_CALL_ADDR) is None
+
+
+def test_caller_frees_returns_none_for_unknown_caller():
+    eng = _engine([_free_plt(), _malloc_plt(), _release_func(), _df_run_func()])
+    assert eng.caller_frees_arg_before_call("ghost", 0x401234) is None

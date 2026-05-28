@@ -400,6 +400,140 @@ class AngrEngine:
                 return insn.address
         return None
 
+    def caller_frees_arg_before_call(self, caller_name: str, call_addr: int) -> int | None:
+        """Detect that the call's pointer argument was already freed by the caller.
+
+        In caller ``caller_name``, locate the call instruction at ``call_addr``
+        (a call to an in-binary helper that frees its argument). The pointer
+        passed to it lives in ``rdi`` (x86_64 SysV first argument), which -O0
+        codegen sources from a stack slot. If that *same* stack slot was handed
+        to ``free`` *earlier in the same function*, with no intervening
+        reallocation (``malloc``/``calloc``/``realloc``) that would overwrite
+        the slot, return the address of that earlier ``free`` call; otherwise
+        ``None``.
+
+        This is the caller-side half of the single-hop cross-function
+        double-free (CWE-415): the caller frees a pointer, then passes it to a
+        callee that frees it again. It is the symmetric companion to
+        :meth:`caller_uses_arg_after_call` (which detects a *dereference* after
+        the callee frees, i.e. CWE-416); here the second event is a second
+        ``free`` rather than a use.
+
+        x86_64 only: the alias tracking relies on the SysV first-argument
+        register (``rdi``) and -O0 stack-slot spill conventions.
+        """
+        import re
+
+        load_slot = re.compile(
+            r"^(r[a-z0-9]+),\s*(?:qword ptr )?\[(rbp|rsp)\s*([+\-]\s*(?:0x[0-9a-f]+|\d+))\]$"
+        )
+        store_to_slot = re.compile(
+            r"^(?:qword ptr )?\[(rbp|rsp)\s*([+\-]\s*(?:0x[0-9a-f]+|\d+))\],\s*(r[a-z0-9]+)$"
+        )
+        reg_copy = re.compile(r"^(r[a-z0-9]+),\s*(r[a-z0-9]+)$")
+
+        cfg = self.cfg()
+        func = None
+        for f in cfg.kb.functions.values():
+            if f.name == caller_name:
+                func = f
+                break
+        if func is None:
+            return None
+
+        insns = []
+        for block in func.blocks:
+            try:
+                insns.extend(block.capstone.insns)
+            except Exception:  # pragma: no cover - defensive
+                continue
+        insns.sort(key=lambda i: i.address)
+
+        call_idx = next((i for i, ins in enumerate(insns) if ins.address == call_addr), None)
+        if call_idx is None:
+            return None
+
+        # Which stack slot supplied rdi to this (the second-free) call?
+        arg_slot: str | None = None
+        rdi_aliases: set[str] = {"rdi"}
+        for prev in reversed(insns[max(0, call_idx - 8): call_idx]):
+            mc = reg_copy.match(prev.op_str)
+            if prev.mnemonic == "mov" and mc and mc.group(1) in rdi_aliases:
+                rdi_aliases.add(mc.group(2))
+                continue
+            ml = load_slot.match(prev.op_str)
+            if prev.mnemonic == "mov" and ml and ml.group(1) in rdi_aliases:
+                arg_slot = f"{ml.group(2)}{ml.group(3).replace(' ', '')}"
+                break
+        if arg_slot is None:
+            return None
+
+        # Scan backward from the call for an earlier `call free` whose rdi
+        # aliased the same slot, stopping if the slot is reallocated (a new
+        # malloc result stored into it) — that would make the second free a
+        # legitimate first free of fresh memory.
+        for idx in range(call_idx - 1, -1, -1):
+            insn = insns[idx]
+            # A store of a register into our slot AFTER an allocation reloads
+            # the slot with new memory; treat any `mov [slot], reg` preceded by
+            # a malloc-family call as a reallocation that clears the candidate.
+            ms = store_to_slot.match(insn.op_str)
+            if insn.mnemonic == "mov" and ms and \
+                    f"{ms.group(1)}{ms.group(2).replace(' ', '')}" == arg_slot:
+                if self._slot_store_follows_alloc(insns, idx, cfg):
+                    return None
+                continue
+            if insn.mnemonic == "call":
+                target = self._resolve_call_target(insn, cfg)
+                if target == "free":
+                    if arg_slot in self._slots_aliasing_rdi_before(insns, idx):
+                        return insn.address
+                # Any non-free call before our free candidate is irrelevant to
+                # whether the slot was freed; keep scanning back.
+        return None
+
+    def _slot_store_follows_alloc(self, insns: list, store_idx: int, cfg: Any) -> bool:
+        """True if the store at ``store_idx`` writes a malloc-family result.
+
+        Looks back a few instructions for a ``call malloc|calloc|realloc`` whose
+        ``rax`` result is what is being stored — i.e. the slot is being
+        (re)allocated, not merely re-spilled.
+        """
+        import re
+
+        reg = re.compile(r"^(?:qword ptr )?\[[^\]]+\],\s*(r[a-z0-9]+)$")
+        m = reg.match(insns[store_idx].op_str)
+        src = m.group(1) if m else None
+        if src is None:
+            return False
+        for prev in insns[max(0, store_idx - 4): store_idx]:
+            if prev.mnemonic == "call":
+                if self._resolve_call_target(prev, cfg) in {"malloc", "calloc", "realloc"}:
+                    # malloc returns in rax; -O0 stores rax (or its alias) here.
+                    return src in {"rax", "eax"}
+        return False
+
+    def _slots_aliasing_rdi_before(self, insns: list, call_idx: int) -> set[str]:
+        """Stack slots that aliased ``rdi`` in the instructions before a call."""
+        import re
+
+        load_slot = re.compile(
+            r"^(r[a-z0-9]+),\s*(?:qword ptr )?\[(rbp|rsp)\s*([+\-]\s*(?:0x[0-9a-f]+|\d+))\]$"
+        )
+        reg_copy = re.compile(r"^(r[a-z0-9]+),\s*(r[a-z0-9]+)$")
+
+        rdi_aliases: set[str] = {"rdi"}
+        slots: set[str] = set()
+        for prev in reversed(insns[max(0, call_idx - 8): call_idx]):
+            mc = reg_copy.match(prev.op_str)
+            if prev.mnemonic == "mov" and mc and mc.group(1) in rdi_aliases:
+                rdi_aliases.add(mc.group(2))
+                continue
+            ml = load_slot.match(prev.op_str)
+            if prev.mnemonic == "mov" and ml and ml.group(1) in rdi_aliases:
+                slots.add(f"{ml.group(2)}{ml.group(3).replace(' ', '')}")
+        return slots
+
     def _resolve_call_target(self, insn: Any, cfg: Any) -> str | None:
         """Resolve a call instruction's target to a symbol name if possible.
 
