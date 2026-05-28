@@ -11,8 +11,9 @@ through the program, and human-readable evidence.
 
 Where shallow pattern-matchers scan disassembly line-by-line, autopsy reasons
 about the *whole program*: call-graph reachability, data flow from
-attacker-controlled sources to dangerous sinks, and intra-procedural pointer
-lifetimes. It is slower and deeper by design.
+attacker-controlled sources to dangerous sinks, and pointer lifetimes both
+within a function and across a single call hop. It is slower and deeper by
+design.
 
 > **Scope:** ELF only. Full check coverage on x86_64; the call-site-driven
 > checks (CWE-78, CWE-190) also run on AArch64. See
@@ -152,10 +153,12 @@ autopsy --binary tests/fixtures/cwe190-vuln --checks 190 --format json
 }
 ```
 
-### CWE-416 — use-after-free (intra-procedural)
+### CWE-416 — use-after-free (intra-procedural and single-hop interprocedural)
 
-Within one function body, a pointer is `free`d and then dereferenced, with no
-function call between the free and the use.
+The CWE-416 check runs two passes:
+
+**Intra-procedural.** Within one function body, a pointer is `free`d and then
+dereferenced, with no function call between the free and the use.
 
 ```bash
 autopsy --binary tests/fixtures/cwe416-vuln --checks 416 --format json
@@ -175,6 +178,37 @@ autopsy --binary tests/fixtures/cwe416-vuln --checks 416 --format json
   "confidence": "high"
 }
 ```
+
+**Single-hop interprocedural.** Real-world use-after-free bugs usually span a
+call boundary: a caller hands a pointer to a callee that frees it, then keeps
+using the now-dangling pointer. autopsy detects this single-hop pattern — a
+caller `G` passing a pointer to an in-binary callee `F` that frees its argument,
+followed by a dereference of that same pointer in `G` before any other call.
+These cross-function findings carry `confidence: "medium"` (the free and the use
+are both confirmed via stack-slot aliasing, but the single-hop restriction makes
+this a structural match rather than a full data-flow proof). Deeper multi-hop
+call chains are intentionally not followed, to keep false positives at zero.
+
+```bash
+autopsy --binary tests/fixtures/cwe416-interproc-vuln --checks 416 --format json
+```
+
+```json
+{
+  "cwe": 416,
+  "function": "run",
+  "address": "0x401193",
+  "taint_trace": [
+    {"address": "0x40118a", "description": "pointer passed to release(), which frees it"},
+    {"address": "0x401193", "description": "freed pointer dereferenced in run after release() returned (use-after-free)"}
+  ],
+  "evidence": "single-hop cross-function use-after-free: run passes a pointer to release() (which frees it) then dereferences it at 0x401193 with no intervening call",
+  "confidence": "medium"
+}
+```
+
+> Both CWE-416 passes use x86_64 register/stack-slot conventions and run on
+> x86_64 (AMD64) targets only; on AArch64 the register-level checks are skipped.
 
 ### CWE-78 — OS command injection
 
