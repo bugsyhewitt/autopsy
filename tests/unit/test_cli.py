@@ -35,8 +35,11 @@ def test_format_sarif_accepted():
 
 
 def test_binary_is_required():
+    # --binary is no longer argparse-required (so --list-checks can run without
+    # a target); it is enforced in main(), which exits non-zero via
+    # parser.error -> SystemExit when an analysis run omits it.
     with pytest.raises(SystemExit):
-        cli.build_parser().parse_args(["--checks", "119"])
+        cli.main(["--checks", "119"])
 
 
 def test_main_prints_json_and_returns_zero(monkeypatch, capsys):
@@ -332,6 +335,59 @@ def test_baseline_not_applied_on_engine_error(monkeypatch, tmp_path):
     path.write_text('{"version":"1","findings":[]}')
     rc = cli.main(["--binary", "b", "--baseline", str(path)])
     assert rc == 1
+
+
+# --- --list-checks offline detector catalog -------------------------------
+
+
+def test_list_checks_flag_defaults_false():
+    args = cli.build_parser().parse_args(["--binary", "x"])
+    assert args.list_checks is False
+
+
+def test_help_lists_list_checks(capsys):
+    parser = cli.build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--help"])
+    out = capsys.readouterr().out
+    assert "--list-checks" in out
+
+
+def test_list_checks_text_runs_without_binary(monkeypatch, capsys):
+    # Must never touch the analyzer: spy that fails if analyze() is called.
+    def _boom(**kw):  # pragma: no cover - asserts it is never reached
+        raise AssertionError("analyze() must not run for --list-checks")
+
+    monkeypatch.setattr("autopsy.analyzer.analyze", _boom)
+    rc = cli.main(["--list-checks"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    # Every supported CWE id and its --checks token appears in the text output.
+    for cwe in (78, 119, 190, 415, 416, 134, 787):
+        assert f"CWE-{cwe}" in out
+        assert f"--checks {cwe}" in out
+    assert "Buffer Overflow" in out
+
+
+def test_list_checks_json_is_machine_readable(capsys):
+    rc = cli.main(["--list-checks", "--format", "json"])
+    assert rc == 0
+    doc = json.loads(capsys.readouterr().out)
+    checks = doc["checks"]
+    cwes = {c["cwe"] for c in checks}
+    assert cwes == {78, 119, 190, 415, 416, 134, 787}
+    sample = next(c for c in checks if c["cwe"] == 119)
+    assert sample["token"] == "119"
+    assert sample["short"] == "Buffer Overflow"
+    assert sample["uri"].endswith("/119.html")
+    assert "name" in sample
+
+
+def test_list_checks_ignores_missing_binary(monkeypatch, capsys):
+    # Even without --binary, --list-checks exits 0 (no parser.error).
+    rc = cli.main(["--list-checks"])
+    assert rc == 0
+    assert capsys.readouterr().out.strip()
 
 
 def test_baseline_sarif_output_excludes_suppressed(monkeypatch, tmp_path, capsys):
