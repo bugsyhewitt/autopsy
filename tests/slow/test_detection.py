@@ -519,19 +519,58 @@ def test_aarch64_runs_cwe415_under_all(require_angr, fixtures_dir):
     )
 
 
+def test_cwe369_detected_on_aarch64(require_angr, fixtures_dir):
+    # AArch64 (ARM64) support for the arch-aware register-level CWE-369 check:
+    # the divisor is the THIRD operand of `sdiv`/`udiv` (`sdiv Wd, Wn, Wm` -> Wm),
+    # and a division with no preceding zero-check (`cbz`/`cbnz` on the divisor, or
+    # `cmp`/`tst` + `b.<cond>`) co-located with an attacker-input source is the
+    # CWE-369 site. The same vulnerable/safe split as the x86_64 fixture holds.
+    # (ARMv8 defines divide-by-zero as 0 rather than a trap, so the consequence
+    # differs from x86_64's SIGFPE, but the unguarded divisor is the weakness.)
+    rep = _analyze(fixtures_dir, "cwe369-aarch64-vuln", "369")
+    d = rep.to_dict()
+    assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
+    cwe369 = [f for f in d["findings"] if f["cwe"] == 369]
+    assert cwe369, f"expected a CWE-369 finding on aarch64, got {d['findings']}"
+    vuln = [f for f in cwe369 if f["function"] == "risky_ratio"]
+    assert vuln, f"expected the unguarded sdiv in risky_ratio(), got {cwe369}"
+    _assert_finding_contract(vuln[0], 369)
+    # The zero-checked division in safe_ratio (cbnz/cmp guard) must never fire.
+    assert all(f["function"] != "safe_ratio" for f in cwe369), (
+        f"the zero-checked division in safe_ratio must not fire on aarch64: {cwe369}"
+    )
+    # Unguarded divisor + input source -> medium confidence (same as x86_64).
+    assert vuln[0]["confidence"] == "medium"
+
+
+def test_aarch64_runs_cwe369_under_all(require_angr, fixtures_dir):
+    # Under "all" on AArch64, CWE-369 now runs (it is no longer in the skipped
+    # set) and its findings surface alongside the call-site-driven checks.
+    rep = _analyze(fixtures_dir, "cwe369-aarch64-vuln", "all")
+    d = rep.to_dict()
+    assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
+    assert 369 not in d["skipped_checks"], (
+        f"CWE-369 should run on AArch64, but was skipped: {d['skipped_checks']}"
+    )
+    assert any(f["cwe"] == 369 for f in d["findings"]), (
+        f"expected CWE-369 findings under 'all' on aarch64: {d['findings']}"
+    )
+
+
 def test_aarch64_skips_register_level_checks(require_angr, fixtures_dir):
-    # On AArch64, the x86_64-only register-level checks (CWE-119/369/416/476/787)
+    # On AArch64, the x86_64-only register-level checks (CWE-119/416/476/787)
     # are skipped rather than producing unsound results; the arch-agnostic
-    # checks — including the arch-aware CWE-732/190/134/415 — still run.
+    # checks — including the arch-aware CWE-732/190/134/415/369 — still run.
     rep = _analyze(fixtures_dir, "cwe78-aarch64-vuln", "all")
     d = rep.to_dict()
     assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
-    assert set(d["skipped_checks"]) == {119, 369, 416, 476, 787}
-    # CWE-732/190/134/415 are arch-aware and must NOT be skipped on AArch64.
+    assert set(d["skipped_checks"]) == {119, 416, 476, 787}
+    # CWE-732/190/134/415/369 are arch-aware and must NOT be skipped on AArch64.
     assert 732 not in d["skipped_checks"]
     assert 190 not in d["skipped_checks"]
     assert 134 not in d["skipped_checks"]
     assert 415 not in d["skipped_checks"]
+    assert 369 not in d["skipped_checks"]
     # The CWE-78 finding still surfaces under "all".
     assert any(f["cwe"] == 78 for f in d["findings"])
 

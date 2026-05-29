@@ -173,11 +173,12 @@ def test_cwe369_in_catalog():
     assert 369 in cat
 
 
-def test_cwe369_is_register_level_not_arch_agnostic():
-    """CWE-369 inspects x86_64 divisor registers, so it is NOT arch-agnostic."""
+def test_cwe369_is_arch_aware_runs_on_aarch64():
+    """CWE-369's divisor/guard reasoning is arch-aware (x86_64 div/idiv and
+    AArch64 sdiv/udiv), so it is in the arch-agnostic set and runs on AArch64."""
     from autopsy.engine import AngrEngine
 
-    assert 369 not in AngrEngine._ARCH_AGNOSTIC_CHECKS
+    assert 369 in AngrEngine._ARCH_AGNOSTIC_CHECKS
 
 
 def test_resolve_checks_369():

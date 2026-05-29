@@ -12,6 +12,7 @@ analysis for CWE-aligned detection. Engine: angr (SecureSystemsLab).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -140,9 +141,19 @@ class AngrEngine:
     #     sound on AArch64 too. (Its single-hop interprocedural companion pass
     #     remains x86_64-only and simply reports nothing on AArch64.)
     #
-    # The remaining register-level checks (CWE-119/416/476/787/369) still rely
-    # on x86_64 stack-slot/alias conventions and are skipped on AArch64.
-    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 134, 190, 338, 367, 377, 415, 676, 732)
+    #     CWE-369 (divide-by-zero) locates a division whose divisor is not
+    #     guarded by a preceding zero-check; ``divisions_with_unguarded_divisor``
+    #     knows both the x86_64 (``div``/``idiv`` single divisor operand; guard
+    #     via ``cmp``/``test`` + conditional jump) and the AArch64
+    #     (``sdiv``/``udiv`` third operand; guard via ``cbz``/``cbnz`` or
+    #     ``cmp``/``tst`` + ``b.<cond>``) forms, so it is sound on AArch64 too.
+    #     (ARMv8 defines divide-by-zero as 0 rather than a trap, so the AArch64
+    #     consequence is a silently-wrong result, not a SIGFPE — but the
+    #     unguarded divisor is still the weakness.)
+    #
+    # The remaining register-level checks (CWE-119/416/476/787) still rely on
+    # x86_64 stack-slot/alias conventions and are skipped on AArch64.
+    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 134, 190, 338, 367, 369, 377, 415, 676, 732)
 
     def assert_supported(self) -> None:
         """Reject targets on architectures autopsy cannot analyze.
@@ -151,9 +162,9 @@ class AngrEngine:
         arch-agnostic checks — the call-site-driven ones (CWE-78/338/367/377/
         676) and the arch-aware register-level checks (CWE-190 integer overflow,
         CWE-732 permission assignment, CWE-134 uncontrolled format string,
-        CWE-415 double-free); the remaining register-level checks
-        (CWE-119/416/476/787/369) use x86_64 register conventions and report no
-        findings on AArch64 — see
+        CWE-415 double-free, CWE-369 divide-by-zero); the remaining
+        register-level checks (CWE-119/416/476/787) use x86_64 register
+        conventions and report no findings on AArch64 — see
         :meth:`checks_supported_on_arch`.
         """
         arch_name = self.project.arch.name
@@ -1298,46 +1309,71 @@ class AngrEngine:
                     )
         return results
 
-    # Division mnemonics whose divisor (the single explicit operand) can be zero
-    # at runtime. ``div``/``idiv`` raise #DE (SIGFPE) when the divisor is 0.
+    # Division mnemonics whose divisor can be zero at runtime, by architecture.
+    # x86_64 ``div``/``idiv`` take the divisor as their single explicit operand
+    # and raise #DE (SIGFPE) when it is 0. AArch64 ``sdiv``/``udiv`` take the
+    # divisor as the *third* operand (``sdiv Wd, Wn, Wm`` -> Wm); ARMv8 does not
+    # trap on integer divide-by-zero — the result is defined as 0 — so the
+    # weakness on AArch64 is the logic error (a silently-wrong 0 result that an
+    # attacker can force), not a crash. Either way the unguarded divisor is the
+    # CWE-369 site the check reports.
     _DIV_MNEMONICS: frozenset[str] = frozenset({"div", "idiv"})
+    _DIV_MNEMONICS_AARCH64: frozenset[str] = frozenset({"sdiv", "udiv"})
 
     def divisions_with_unguarded_divisor(self) -> list[dict[str, Any]]:
-        """Find ``div``/``idiv`` sites whose divisor is a non-immediate, unguarded value.
+        """Find division sites whose divisor is a non-immediate, unguarded value.
 
-        x86_64 ``div``/``idiv`` take a single explicit operand — the divisor —
-        which is always a register or memory location (the instruction has no
-        immediate form). The CPU raises a divide-error (#DE → SIGFPE) when that
-        divisor is zero. A division is therefore a candidate CWE-369 site unless
-        the program *guards* the divisor with a zero-check before the divide.
+        A division is a candidate CWE-369 site unless the program *guards* the
+        divisor with a zero-check before the divide. For each division this
+        method walks back through the instructions that precede it in the same
+        function and looks for a guard naming the divisor register (or its
+        widening); guarded sites are excluded to preserve the zero-false-positive
+        guarantee on well-written code (``if (d == 0) return;``).
 
-        For each division this method walks back through the instructions that
-        precede it in the same function and looks for a guard: a ``test`` or
-        ``cmp`` whose operand mentions the divisor register (or its widening),
-        followed by a conditional branch (``je``/``jz``/``jne``/``jnz``/``jbe``/
-        ``jb``/etc.). The presence of such a compare-and-branch on the divisor is
-        the classic ``if (d == 0) return;`` guard, so guarded sites are excluded
-        to preserve the zero-false-positive guarantee on well-written code.
+        Architecture-aware. On x86_64 ``div``/``idiv`` take a single explicit
+        operand — the divisor — which is always a register or memory location
+        (no immediate form); the CPU raises a divide-error (#DE → SIGFPE) when
+        that divisor is zero. The guard idiom is a ``test``/``cmp`` naming the
+        divisor followed by a conditional jump (``je``/``jz``/...). On AArch64
+        ``sdiv``/``udiv`` take the divisor as the *third* operand
+        (``sdiv Wd, Wn, Wm`` → ``Wm``); the guard idiom is a ``cbz``/``cbnz`` on
+        the divisor, or a ``cmp``/``tst`` naming it followed by a conditional
+        branch (``b.eq``/``b.ne``/...). (ARMv8 defines divide-by-zero as 0 rather
+        than a trap, so the AArch64 consequence is a silently-wrong result an
+        attacker can force, not a SIGFPE — but the unguarded divisor is still the
+        weakness.)
 
         Returns one dict per *unguarded* division:
         ``{"address": int, "function": str, "divisor": str}``. The list is empty
-        on non-AMD64 targets — the divisor-register / guard reasoning relies on
-        x86_64 disassembly, so the check is x86_64 only (it is excluded from the
-        architecture-agnostic set and skipped on AArch64 upstream).
+        on architectures other than AMD64/AARCH64.
         """
         import re
 
-        if self.project.arch.name != "AMD64":
+        arch = self.project.arch.name
+        if arch == "AMD64":
+            div_mnemonics = self._DIV_MNEMONICS
+            aarch64 = False
+        elif arch == "AARCH64":
+            div_mnemonics = self._DIV_MNEMONICS_AARCH64
+            aarch64 = True
+        else:
             return []
 
-        # The divisor operand of div/idiv: a bare register (``rcx``/``ecx``) or a
-        # memory reference (``dword ptr [rbp-4]``). We extract the leading token
-        # for register operands; memory operands are reported verbatim.
+        # The divisor operand of div/idiv (x86_64): a bare register (``rcx``/
+        # ``ecx``) or a memory reference (``dword ptr [rbp-4]``).
         reg_operand = re.compile(r"^(?:[a-z]+ ptr )?(?:[er][a-z0-9]+|[a-z]+l|[a-z]+x)$")
-        # A zero-check guard: cmp/test naming the divisor, then a conditional jump.
+        # An AArch64 GPR token (the w/x view), used to pull the divisor (third
+        # operand of sdiv/udiv) and to match a guard register.
+        aarch64_reg = re.compile(r"\b([wx](?:[12]?[0-9]|3[01]|zr))\b")
+        # x86_64 zero-check guard: cmp/test naming the divisor, then a cond. jump.
         cond_jumps = {
             "je", "jz", "jne", "jnz", "jbe", "jb", "ja", "jae",
             "jle", "jl", "jg", "jge", "js", "jns",
+        }
+        # AArch64 conditional-branch suffixes following a cmp/tst guard.
+        aarch64_cond_branches = {
+            "b.eq", "b.ne", "b.lt", "b.le", "b.gt", "b.ge",
+            "b.hi", "b.hs", "b.lo", "b.ls", "b.mi", "b.pl",
         }
 
         cfg = self.cfg()
@@ -1354,19 +1390,43 @@ class AngrEngine:
             insns.sort(key=lambda i: i.address)
 
             for idx, insn in enumerate(insns):
-                if insn.mnemonic not in self._DIV_MNEMONICS:
+                if insn.mnemonic not in div_mnemonics:
                     continue
-                divisor = insn.op_str.strip()
-                if not divisor:
-                    continue
-                # Divisor register aliases we look for in a preceding guard. For a
-                # memory divisor we match the whole operand string.
-                if reg_operand.match(divisor) and "[" not in divisor:
-                    aliases = {divisor, self._widen(divisor)}
+
+                if aarch64:
+                    # sdiv/udiv Wd, Wn, Wm -> the divisor is the third operand.
+                    operands = [o.strip() for o in insn.op_str.split(",")]
+                    if len(operands) < 3:
+                        continue
+                    m = aarch64_reg.search(operands[2])
+                    if not m:
+                        continue
+                    divisor = m.group(1)
+                    num = divisor[1:]
+                    aliases = {f"w{num}", f"x{num}"}
+                    # At -O0 the divisor register is reloaded from a stack slot
+                    # right before the divide; a zero-check guard often tests a
+                    # *different* register loaded from that same slot. Resolve the
+                    # divisor's source slot so a guard on any reg aliasing it
+                    # counts (preserving the zero-false-positive posture).
+                    slot = self._aarch64_divisor_slot(insns, idx, aliases)
+                    if self._aarch64_divisor_is_guarded(
+                        insns, idx, aliases, aarch64_cond_branches, slot
+                    ):
+                        continue
                 else:
-                    aliases = {divisor}
-                if self._divisor_is_guarded(insns, idx, aliases, cond_jumps):
-                    continue
+                    divisor = insn.op_str.strip()
+                    if not divisor:
+                        continue
+                    # Divisor register aliases we look for in a preceding guard.
+                    # For a memory divisor we match the whole operand string.
+                    if reg_operand.match(divisor) and "[" not in divisor:
+                        aliases = {divisor, self._widen(divisor)}
+                    else:
+                        aliases = {divisor}
+                    if self._divisor_is_guarded(insns, idx, aliases, cond_jumps):
+                        continue
+
                 results.append(
                     {
                         "address": insn.address,
@@ -1393,6 +1453,106 @@ class AngrEngine:
             ):
                 saw_compare_on_divisor = True
             elif saw_compare_on_divisor and ins.mnemonic in cond_jumps:
+                return True
+        return False
+
+    # An AArch64 stack-slot memory operand, e.g. ``[sp, #0x4]`` / ``[x29, #-8]``.
+    _AARCH64_SLOT_RE = re.compile(r"\[(sp|x29)\s*(?:,\s*#(-?(?:0x[0-9a-f]+|\d+)))?\]")
+    # ``ldr <wreg/xreg>, [slot]`` — a reload of a stack slot into a register.
+    _AARCH64_LDR_RE = re.compile(
+        r"^\s*([wx](?:[12]?[0-9]|3[01]))\s*,\s*(\[(?:sp|x29)[^\]]*\])"
+    )
+
+    @classmethod
+    def _aarch64_divisor_slot(cls, insns, div_idx, aliases) -> str | None:
+        """The stack slot the divisor register was last loaded from before the
+        division, or ``None`` if it was not a slot reload.
+
+        At -O0 the divisor arrives as ``ldr w9, [sp, #N]`` shortly before the
+        ``sdiv``. Returns the normalized slot operand string (``[sp, #0x4]``) so
+        a zero-check on any other register loaded from that same slot can be
+        recognized as the divisor's guard.
+        """
+        window = insns[max(0, div_idx - 24): div_idx]
+        slot: str | None = None
+        for ins in window:
+            if ins.mnemonic != "ldr":
+                continue
+            m = cls._AARCH64_LDR_RE.match(ins.op_str)
+            if not m:
+                continue
+            dest = m.group(1)
+            num = dest[1:]
+            if f"w{num}" in aliases or f"x{num}" in aliases:
+                slot = cls._normalize_slot(m.group(2))
+        return slot
+
+    @classmethod
+    def _normalize_slot(cls, operand: str) -> str | None:
+        """Canonicalize a stack-slot operand to ``base#offset`` for comparison."""
+        m = cls._AARCH64_SLOT_RE.search(operand)
+        if not m:
+            return None
+        base = m.group(1)
+        off = m.group(2) or "0"
+        return f"{base}#{int(off, 0)}"
+
+    @classmethod
+    def _aarch64_divisor_is_guarded(
+        cls, insns, div_idx, aliases, cond_branches, slot=None
+    ) -> bool:
+        """True if an AArch64 zero-check on the divisor precedes the division.
+
+        Guard idioms, all bounded to the instructions before the division:
+
+        * ``cbz``/``cbnz`` whose register operand is the divisor (a direct
+          compare-and-branch on zero), or
+        * ``cmp``/``tst`` that mentions the divisor, followed — anywhere before
+          the divide — by a conditional branch (``b.eq``/``b.ne``/...).
+
+        The divisor's w/x views are treated as the same logical register
+        (``cbz x9`` guards an ``sdiv ..., w9``). When the divisor was reloaded
+        from a stack slot (``slot``), any register loaded from that *same* slot
+        is also treated as the divisor — at -O0 the zero-check commonly tests a
+        sibling register reloaded from the slot (``cbnz w8`` guarding an
+        ``sdiv ..., w9`` where both came from ``[sp, #N]``).
+        """
+        first_operand = re.compile(r"^\s*([wx](?:[12]?[0-9]|3[01]|zr))\b")
+
+        # Build the live set of registers that alias the divisor (directly or
+        # via the shared source slot), scanning forward through the window so a
+        # reload's destination becomes a divisor alias from that point on.
+        window_start = max(0, div_idx - 24)
+        window = insns[window_start: div_idx]
+
+        def slot_alias_regs() -> set[str]:
+            regs: set[str] = set()
+            if slot is None:
+                return regs
+            for ins in window:
+                if ins.mnemonic != "ldr":
+                    continue
+                m = cls._AARCH64_LDR_RE.match(ins.op_str)
+                if m and cls._normalize_slot(m.group(2)) == slot:
+                    dest = m.group(1)
+                    num = dest[1:]
+                    regs.add(f"w{num}")
+                    regs.add(f"x{num}")
+            return regs
+
+        all_aliases = set(aliases) | slot_alias_regs()
+
+        saw_compare_on_divisor = False
+        for ins in window:
+            if ins.mnemonic in ("cbz", "cbnz"):
+                m = first_operand.match(ins.op_str)
+                if m and m.group(1) in all_aliases:
+                    return True
+            elif ins.mnemonic in ("cmp", "tst") and any(
+                a in ins.op_str.split(",")[0] for a in all_aliases
+            ):
+                saw_compare_on_divisor = True
+            elif saw_compare_on_divisor and ins.mnemonic in cond_branches:
                 return True
         return False
 
