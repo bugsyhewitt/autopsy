@@ -256,6 +256,38 @@ the post-v0.1 deepening (see Tier 3 item #9).
 
 ---
 
+### Additional shipped detector — Incorrect permission assignment (CWE-732) ✅ IMPLEMENTED (Rotation 18)
+
+**Status:** Shipped. A new CWE-732 (Incorrect Permission Assignment for Critical
+Resource) check detects two over-permissive permission patterns, both
+angr-free and register-level: (1) a `chmod`/`fchmod`/`lchmod`/`fchmodat` call
+whose *mode* argument is a compile-time immediate that sets the group-write
+(`0o020`) or world-write (`0o002`) bit — the classic `chmod(path, 0777)` /
+`chmod(path, 0666)` mistake; and (2) a `umask` call whose immediate mask fails
+to strip **both** of those bits (e.g. `umask(0)`), leaving every subsequently
+created file group/world-writable. Two engine helpers do the disassembly-level
+work — `AngrEngine.chmod_calls_with_permissive_mode` (mode register: SysV `rsi`
+for chmod/fchmod/lchmod, `rdx` for fchmodat) and
+`AngrEngine.umask_calls_with_permissive_mask` (mask in `rdi`) — each walking
+back from the call site to resolve the immediate through the `-O0` instruction
+window and following register-copy aliases. A mode/mask **computed at runtime**
+(loaded from a register or stack slot) is intentionally not flagged: its value
+is unknown, so flagging would break autopsy's zero-false-positive posture. Like
+CWE-676/377/338, CWE-732 needs no attacker-input source — the over-permissive
+literal is the weakness itself, which is how MITRE frames it. `chmod`-family
+findings report `confidence: "high"` (a definitive over-permissive literal);
+`umask` findings report `confidence: "medium"` (a process-wide policy whose
+impact depends on what files are later created). x86_64 only (register-level;
+excluded from the arch-agnostic set and skipped on AArch64). The check lives in
+`autopsy/checks/cwe732.py`, is registered in `CHECKS`, and `"732"` is a valid
+`--checks` token. A fixture `tests/fixtures/cwe732-vuln.c` exercises the
+vulnerable `chmod(0777)`/`chmod(0666)`/`umask(0)` against restrictive companions
+(`chmod(0600)` in `lock_down()`, `umask(0077)` in `tight_umask()`) that must not
+fire. CWE-732 sits in the access-control weakness family on the CWE Top 25 and
+is the next angr-free heuristic after CWE-369 (divide-by-zero, R17).
+
+---
+
 ## Tier 3 — Later / harder / lower near-term value
 
 ### 7. PE (Windows) binary support

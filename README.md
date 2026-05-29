@@ -45,7 +45,7 @@ autopsy --version
 ## Usage
 
 ```
-autopsy --binary PATH [--checks {119,190,377,415,416,78,134,676,787,all}] [--max-states N]
+autopsy --binary PATH [--checks {119,190,338,369,377,415,416,78,134,676,732,787,all}] [--max-states N]
         [--format json|sarif] [--fail-on LEVEL] [--baseline PATH] [--write-baseline PATH]
 autopsy --list-checks [--format json]
 ```
@@ -170,7 +170,7 @@ never written from, nor applied to, a half-finished run.
 
 | Architecture | Checks that run |
 |---|---|
-| **x86_64 (AMD64)** | all checks (CWE-119, 190, 338, 369, 377, 415, 416, 78, 134, 676, 787) |
+| **x86_64 (AMD64)** | all checks (CWE-119, 190, 338, 369, 377, 415, 416, 78, 134, 676, 732, 787) |
 | **AArch64 (ARM64)** | the call-site-driven checks: **CWE-78**, **CWE-190**, **CWE-338**, **CWE-377** and **CWE-676** |
 
 On an AArch64 target, the register-level checks (CWE-119/369/415/416/134/787)
@@ -180,12 +180,12 @@ producing unsound results. Skipped checks are listed in the report's
 
 ```bash
 autopsy --binary ./arm64-target --checks all
-# stderr: note: skipped CWE-119, CWE-369, CWE-415, CWE-416, CWE-134, CWE-787 (not supported on this target's architecture)
+# stderr: note: skipped CWE-119, CWE-369, CWE-415, CWE-416, CWE-134, CWE-732, CWE-787 (not supported on this target's architecture)
 ```
 
 ```json
 {
-  "checks": [119, 190, 338, 369, 377, 415, 416, 78, 134, 676, 787],
+  "checks": [119, 190, 338, 369, 377, 415, 416, 78, 134, 676, 732, 787],
   "skipped_checks": [119, 369, 415, 416, 134, 787],
   "findings": [ /* CWE-78 / CWE-190 / CWE-338 / CWE-377 / CWE-676 findings */ ]
 }
@@ -675,6 +675,54 @@ autopsy --binary tests/fixtures/cwe369-vuln --checks 369 --format json
   ],
   "evidence": "unguarded integer division (divisor dword ptr [rbp - 8]) in risky_ratio with no zero-check; attacker input via atoi() can drive the divisor to zero (SIGFPE)",
   "confidence": "medium"
+}
+```
+
+### CWE-732 — incorrect permission assignment for a critical resource
+
+A permission-setting call whose **mode is a compile-time literal that grants
+write access beyond the owner** — the classic `chmod(path, 0777)` /
+`chmod(path, 0666)` mistake — or a `umask()` whose mask fails to strip the
+group/other write bits (e.g. `umask(0)`). Either makes a file (or every file the
+process subsequently creates) writable by users other than its owner, so a local
+attacker can tamper with a config file, a key, a log, or a setuid helper that
+should have been owner-only. This is the weakness CWE-732 names.
+
+The check reads the mode out of the call's argument register (x86_64 SysV:
+`rsi` for `chmod`/`fchmod`/`lchmod`, `rdx` for `fchmodat`, `rdi` for `umask`),
+walking back from the call to resolve the immediate. It flags `chmod`-family
+calls whose mode sets the group-write (`0o020`) or world-write (`0o002`) bit,
+and `umask` calls whose mask does not strip **both** of those bits.
+
+Zero-false-positive posture: a mode/mask **computed at runtime** (loaded from a
+register or stack slot) has an unknown value and is never flagged — only
+provably-permissive literals fire. A restrictive `chmod(path, 0600)` is silent,
+and a `umask(0o077)`/`umask(0o022)` is silent too (the `lock_down` and
+`tight_umask` companions in the fixture stay quiet). Like CWE-676/377/338,
+CWE-732 needs no attacker-input source: an over-permissive permission literal is
+the weakness itself.
+
+`chmod`-family findings carry `confidence: "high"` (a definitive over-permissive
+literal); `umask` findings carry `confidence: "medium"` (a process-wide policy
+whose impact depends on what files are later created).
+
+This is a **register-level** detector (it reads the x86_64 mode-argument
+register), so it runs on **x86_64 only** and is skipped on AArch64.
+
+```bash
+autopsy --binary tests/fixtures/cwe732-vuln --checks 732 --format json
+```
+
+```json
+{
+  "cwe": 732,
+  "function": "expose_secret",
+  "address": "0x40114e",
+  "taint_trace": [
+    {"address": "0x40114e", "description": "chmod() called with over-permissive mode 0o777"}
+  ],
+  "evidence": "chmod() sets mode 0o777 in expose_secret: grants group-write and world-write access, making the resource writable beyond its owner; restrict to 0o600/0o644 (owner-write only)",
+  "confidence": "high"
 }
 ```
 
