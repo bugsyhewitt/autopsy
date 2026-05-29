@@ -519,6 +519,49 @@ def test_aarch64_runs_cwe415_under_all(require_angr, fixtures_dir):
     )
 
 
+def test_cwe416_detected_on_aarch64(require_angr, fixtures_dir):
+    # AArch64 (ARM64) support for the arch-aware intra-procedural CWE-416 check:
+    # the allocator return register (`x0`) is spilled to a stack slot
+    # (`str x0, [sp, #N]`) and reloaded (`ldr x0, [sp, #N]`) before a `bl <free>`
+    # call, then reloaded again after the free and dereferenced (`str`/`ldr`
+    # through the reloaded base register) with no intervening call — the
+    # use-after-free. The same vulnerable/safe split as the x86_64 fixture holds.
+    rep = _analyze(fixtures_dir, "cwe416-aarch64-vuln", "416")
+    d = rep.to_dict()
+    assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
+    cwe416 = [f for f in d["findings"] if f["cwe"] == 416]
+    assert cwe416, f"expected a CWE-416 finding on aarch64, got {d['findings']}"
+    for f in cwe416:
+        _assert_finding_contract(f, 416)
+    funcs = {f["function"] for f in cwe416}
+    # The use-after-free in use_after_free() fires; the safe single free that is
+    # never reused (safe_free) does not.
+    assert "use_after_free" in funcs, f"use-after-free not flagged on aarch64: {cwe416}"
+    assert "safe_free" not in funcs, (
+        f"the freed-but-not-reused pointer in safe_free must not be flagged on "
+        f"aarch64: {cwe416}"
+    )
+    # The fixture reloads the freed pointer from its stack slot before the use,
+    # so slot aliasing is confirmed -> high confidence, as on x86_64.
+    uaf = [f for f in cwe416 if f["function"] == "use_after_free"]
+    assert uaf and uaf[0]["confidence"] == "high"
+
+
+def test_aarch64_runs_cwe416_under_all(require_angr, fixtures_dir):
+    # Under "all" on AArch64, CWE-416 now runs (it is no longer in the skipped
+    # set) and its intra-procedural findings surface alongside the other checks.
+    rep = _analyze(fixtures_dir, "cwe416-aarch64-vuln", "all")
+    d = rep.to_dict()
+    assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
+    # CWE-416 must NOT appear in the skipped set on AArch64 anymore.
+    assert 416 not in d["skipped_checks"], (
+        f"CWE-416 should run on AArch64, but was skipped: {d['skipped_checks']}"
+    )
+    assert any(f["cwe"] == 416 for f in d["findings"]), (
+        f"expected CWE-416 findings under 'all' on aarch64: {d['findings']}"
+    )
+
+
 def test_cwe369_detected_on_aarch64(require_angr, fixtures_dir):
     # AArch64 (ARM64) support for the arch-aware register-level CWE-369 check:
     # the divisor is the THIRD operand of `sdiv`/`udiv` (`sdiv Wd, Wn, Wm` -> Wm),
@@ -558,18 +601,19 @@ def test_aarch64_runs_cwe369_under_all(require_angr, fixtures_dir):
 
 
 def test_aarch64_skips_register_level_checks(require_angr, fixtures_dir):
-    # On AArch64, the x86_64-only register-level checks (CWE-119/416/476/787)
+    # On AArch64, the x86_64-only register-level checks (CWE-119/476/787)
     # are skipped rather than producing unsound results; the arch-agnostic
-    # checks — including the arch-aware CWE-732/190/134/415/369 — still run.
+    # checks — including the arch-aware CWE-732/190/134/415/416/369 — still run.
     rep = _analyze(fixtures_dir, "cwe78-aarch64-vuln", "all")
     d = rep.to_dict()
     assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
-    assert set(d["skipped_checks"]) == {119, 416, 476, 787}
-    # CWE-732/190/134/415/369 are arch-aware and must NOT be skipped on AArch64.
+    assert set(d["skipped_checks"]) == {119, 476, 787}
+    # CWE-732/190/134/415/416/369 are arch-aware and must NOT be skipped on AArch64.
     assert 732 not in d["skipped_checks"]
     assert 190 not in d["skipped_checks"]
     assert 134 not in d["skipped_checks"]
     assert 415 not in d["skipped_checks"]
+    assert 416 not in d["skipped_checks"]
     assert 369 not in d["skipped_checks"]
     # The CWE-78 finding still surfaces under "all".
     assert any(f["cwe"] == 78 for f in d["findings"])

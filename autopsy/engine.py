@@ -151,9 +151,19 @@ class AngrEngine:
     #     consequence is a silently-wrong result, not a SIGFPE — but the
     #     unguarded divisor is still the weakness.)
     #
-    # The remaining register-level checks (CWE-119/416/476/787) still rely on
+    #     CWE-416 (use-after-free, intra-procedural) reuses the same
+    #     allocation/free/stack-slot-aliasing machinery as CWE-415, looking for a
+    #     dereference of the freed pointer (rather than a second free) after the
+    #     free with no intervening call; ``checks.cwe416`` carries x86_64
+    #     (``rax``/``rdi``; ``mov`` over ``[rbp-N]``/``[rsp-N]``; deref ``[rax]``)
+    #     and AArch64 (``x0``; ``str``/``ldr`` over ``[sp,#N]``/``[x29,#N]``;
+    #     deref ``[x9]``) profiles, so it is sound on AArch64 too. (Its
+    #     single-hop interprocedural companion pass remains x86_64-only and
+    #     reports nothing on AArch64.)
+    #
+    # The remaining register-level checks (CWE-119/476/787) still rely on
     # x86_64 stack-slot/alias conventions and are skipped on AArch64.
-    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 134, 190, 338, 367, 369, 377, 415, 676, 732)
+    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 134, 190, 338, 367, 369, 377, 415, 416, 676, 732)
 
     def assert_supported(self) -> None:
         """Reject targets on architectures autopsy cannot analyze.
@@ -162,9 +172,9 @@ class AngrEngine:
         arch-agnostic checks — the call-site-driven ones (CWE-78/338/367/377/
         676) and the arch-aware register-level checks (CWE-190 integer overflow,
         CWE-732 permission assignment, CWE-134 uncontrolled format string,
-        CWE-415 double-free, CWE-369 divide-by-zero); the remaining
-        register-level checks (CWE-119/416/476/787) use x86_64 register
-        conventions and report no findings on AArch64 — see
+        CWE-415 double-free, CWE-416 use-after-free, CWE-369 divide-by-zero);
+        the remaining register-level checks (CWE-119/476/787) use x86_64
+        register conventions and report no findings on AArch64 — see
         :meth:`checks_supported_on_arch`.
         """
         arch_name = self.project.arch.name

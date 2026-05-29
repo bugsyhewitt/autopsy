@@ -172,7 +172,7 @@ never written from, nor applied to, a half-finished run.
 | Architecture | Checks that run |
 |---|---|
 | **x86_64 (AMD64)** | all checks (CWE-119, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787) |
-| **AArch64 (ARM64)** | the call-site-driven checks (**CWE-78**, **CWE-338**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**, **CWE-134**, **CWE-415**, **CWE-369**) |
+| **AArch64 (ARM64)** | the call-site-driven checks (**CWE-78**, **CWE-338**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**, **CWE-134**, **CWE-415**, **CWE-416**, **CWE-369**) |
 
 On an AArch64 target, the **CWE-732** permission check runs natively: its register
 reasoning only reads a single mode/mask *immediate* out of the AAPCS64 argument
@@ -195,7 +195,15 @@ calls, and the scanner knows both the x86_64 form (`rax`/`rdi`; `mov` slot
 store/reload over `[rbp-N]`/`[rsp-N]`) and the AArch64 one (`x0`; `str`/`ldr`
 over `[sp,#N]`/`[x29,#N]`), so it runs on AArch64 too. (Its single-hop
 interprocedural companion pass remains x86_64-only and simply reports nothing on
-AArch64.) The **CWE-369** divide-by-zero check is arch-aware as well: it locates
+AArch64.) The **CWE-416** intra-procedural use-after-free check is arch-aware as
+well: it reuses the same allocation/free/stack-slot-aliasing machinery as
+CWE-415 but, after the `free`, watches for the freed pointer to be reloaded from
+its slot and **dereferenced** through that base register (with no intervening
+call); the scanner knows both the x86_64 form (`rax`/`rdi`; `mov` slot
+store/reload over `[rbp-N]`/`[rsp-N]`; deref `[rax]`) and the AArch64 one (`x0`;
+`str`/`ldr` over `[sp,#N]`/`[x29,#N]`; deref `[x9]`), so it runs on AArch64 too.
+(Its single-hop interprocedural companion pass remains x86_64-only and reports
+nothing on AArch64.) The **CWE-369** divide-by-zero check is arch-aware as well: it locates
 a division whose divisor is not guarded by a preceding zero-check, and the engine
 knows both the x86_64 form (`div`/`idiv` single divisor operand; guard via
 `cmp`/`test` + a conditional jump) and the AArch64 one (`sdiv`/`udiv` third
@@ -203,21 +211,21 @@ operand; guard via `cbz`/`cbnz` on the divisor, or `cmp`/`tst` + `b.<cond>`), so
 it runs on AArch64 too. (ARMv8 defines divide-by-zero as `0` rather than a trap,
 so the AArch64 consequence is a silently-wrong result an attacker can force, not
 a SIGFPE — but the unguarded divisor is still the weakness.) The remaining
-register-level checks (CWE-119/416/476/787) rely on x86_64 stack-slot/register
+register-level checks (CWE-119/476/787) rely on x86_64 stack-slot/register
 conventions, so they are **skipped** rather than producing unsound results.
 Skipped checks are listed in the report's `skipped_checks` array and noted on
 stderr:
 
 ```bash
 autopsy --binary ./arm64-target --checks all
-# stderr: note: skipped CWE-119, CWE-416, CWE-476, CWE-787 (not supported on this target's architecture)
+# stderr: note: skipped CWE-119, CWE-476, CWE-787 (not supported on this target's architecture)
 ```
 
 ```json
 {
   "checks": [119, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787],
-  "skipped_checks": [119, 416, 476, 787],
-  "findings": [ /* CWE-78 / 134 / 190 / 338 / 367 / 369 / 377 / 415 / 676 / 732 findings */ ]
+  "skipped_checks": [119, 476, 787],
+  "findings": [ /* CWE-78 / 134 / 190 / 338 / 367 / 369 / 377 / 415 / 416 / 676 / 732 findings */ ]
 }
 ```
 
@@ -453,8 +461,13 @@ autopsy --binary tests/fixtures/cwe416-interproc-vuln --checks 416 --format json
 }
 ```
 
-> Both CWE-416 passes use x86_64 register/stack-slot conventions and run on
-> x86_64 (AMD64) targets only; on AArch64 the register-level checks are skipped.
+> The **intra-procedural** pass is arch-aware and runs on both x86_64 (AMD64)
+> and AArch64 (ARM64): it tracks the allocator return register into a stack slot
+> and the freed pointer's later dereference, knowing both the x86_64 form
+> (`rax`/`rdi`; `mov` slot store/reload over `[rbp-N]`/`[rsp-N]`; deref `[rax]`)
+> and the AArch64 one (`x0`; `str`/`ldr` over `[sp,#N]`/`[x29,#N]`; deref `[x9]`).
+> The **single-hop interprocedural** pass still uses x86_64-only SysV
+> first-argument/stack-slot conventions and reports nothing on AArch64.
 
 ### CWE-78 — OS command injection
 

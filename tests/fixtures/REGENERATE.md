@@ -24,6 +24,7 @@ run without a compiler. This file documents how to regenerate them if needed.
 | `cwe190-aarch64-vuln.c` + `cwe190-aarch64-stubs.c` / `cwe190-aarch64-vuln` | source + binary: **AArch64** integer overflow into allocator size (exercises the arch-aware register-level CWE-190 check on ARM64) |
 | `cwe134-aarch64-vuln.c` + `cwe134-aarch64-stubs.c` / `cwe134-aarch64-vuln` | source + binary: **AArch64** uncontrolled format string (exercises the arch-aware register-level CWE-134 check on ARM64) |
 | `cwe415-aarch64-vuln.c` + `cwe415-aarch64-stubs.c` / `cwe415-aarch64-vuln` | source + binary: **AArch64** intra-procedural double-free (exercises the arch-aware register-level CWE-415 check on ARM64); the single free in `safe_free()` must not be flagged |
+| `cwe416-aarch64-vuln.c` + `cwe416-aarch64-stubs.c` / `cwe416-aarch64-vuln` | source + binary: **AArch64** intra-procedural use-after-free (exercises the arch-aware register-level CWE-416 check on ARM64: free then dereference of the same pointer in `use_after_free()`); the freed-but-not-reused pointer in `safe_free()` must not be flagged |
 | `cwe369-aarch64-vuln.c` + `cwe369-aarch64-stubs.c` / `cwe369-aarch64-vuln` | source + binary: **AArch64** divide-by-zero (exercises the arch-aware CWE-369 check on ARM64: unguarded `sdiv`/`udiv` in `risky_ratio()`); the zero-checked `safe_ratio()` must not be flagged |
 | `clean-baseline.c` / `clean-baseline` | source + binary: none of the four classes (zero-false-positive check) |
 | `Makefile` | build rules |
@@ -179,6 +180,31 @@ llvm-objdump -d cwe415-aarch64-vuln | grep -A12 '<safe_free>:'
 You should see `str x0, [sp, #0x8]` then two `ldr x0, [sp, #0x8]` / `bl <free>`
 pairs in `<double_free>` (the double-free), and a single `ldr x0, [sp, #0x8]` /
 `bl <free>` in `<safe_free>` (the safe single free that must stay unflagged).
+
+`cwe416-aarch64-vuln` exercises the **arch-aware register-level** CWE-416
+intra-procedural use-after-free check on AArch64: like CWE-415, the allocator
+return register (`x0`) is spilled to a stack slot (`str x0, [sp, #N]`) and
+reloaded (`ldr x0, [sp, #N]`) before the `bl <free>` call. The use-after-free
+signal is, after the free and with NO function call between, a reload of the same
+slot into a register and a **dereference** through that base register
+(`strb wN, [x9]`) — mirroring the x86_64 `mov rax, [rbp-N]` / `mov [rax], ...`
+form, flagged at high confidence because the dereferenced register is a confirmed
+slot reload. The safe companion `safe_free()` frees a pointer it never reuses and
+must NOT fire. Same freestanding cross-build recipe (stub libc in
+`cwe416-aarch64-stubs.c`). Keep the dereference in `use_after_free()` adjacent to
+the free with no intervening call so the pattern stays intra-procedural. Verify
+the codegen with:
+
+```bash
+llvm-objdump -d cwe416-aarch64-vuln | grep -A12 '<use_after_free>:'
+llvm-objdump -d cwe416-aarch64-vuln | grep -A10 '<safe_free>:'
+```
+
+You should see `str x0, [sp, #0x8]`, then `ldr x0, [sp, #0x8]` / `bl <free>`,
+then `ldr x9, [sp, #0x8]` / `strb w8, [x9]` in `<use_after_free>` (the
+reload-and-dereference of the freed pointer). `<safe_free>` ends at its single
+`ldr x0, [sp, #0x8]` / `bl <free>` with no later dereference (must stay
+unflagged).
 
 `cwe369-aarch64-vuln` exercises the **arch-aware** CWE-369 divide-by-zero check
 on AArch64: the divisor is the *third* operand of `sdiv`/`udiv`
