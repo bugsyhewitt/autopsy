@@ -133,10 +133,13 @@ x86_64 rodata-literal form (`lea reg, [rip+disp]`) and the AArch64 one
 non-literal/attacker-controlled format. Freestanding AArch64 fixtures
 (`tests/fixtures/cwe732-aarch64-vuln`, `tests/fixtures/cwe190-aarch64-vuln`,
 `tests/fixtures/cwe134-aarch64-vuln`) plus unit and slow tests lock all three
-behaviors. **Still skipped on AArch64:** the stack-slot/alias register-level
-checks (CWE-119/369/415/416/476/787), which rely on x86_64 `rbp`/`rsp`/`rdi`/
-`rax` spill conventions. Porting those (the slot-tracking abstraction the caveat
-below describes) is the remaining work for this item.
+behaviors. Subsequent rotations made CWE-369 (divide-by-zero), CWE-415
+(intra-procedural double-free), CWE-416 (intra-procedural use-after-free), and
+CWE-787 (out-of-bounds write) arch-aware as well, each with its own freestanding
+AArch64 fixture. **Still skipped on AArch64:** the remaining stack-slot/alias
+register-level checks (CWE-119/476), which rely on x86_64 `rbp`/`rsp`/`rdi`/`rax`
+spill conventions. Porting those (the slot-tracking abstraction the caveat below
+describes) is the remaining work for this item.
 
 **What it is:** Lift the v0.1 x86_64-only scope guard to also accept
 `aarch64`/`arm64` ELF binaries.
@@ -159,10 +162,10 @@ below describes) is the remaining work for this item.
   register and so needed arch-aware mnemonic/register recognition for AArch64 —
   now shipped via `size_arith_before_call`. CWE-732 and CWE-190 are the two
   register-level checks made arch-aware so far.)
-- Remaining Phase 2 scope: port the stack-slot/alias register-level checks
-  (CWE-119/369/415/416/476/787) — the slot-tracking abstraction below — to
-  AArch64; the call-site checks and the three arch-aware register-level checks
-  (CWE-732, CWE-190, CWE-134) already run there.
+- Remaining Phase 2 scope: port the last stack-slot/alias register-level checks
+  (CWE-119/476) — the slot-tracking abstraction below — to AArch64; the call-site
+  checks and the arch-aware register-level checks (CWE-732, CWE-190, CWE-134,
+  CWE-369, CWE-415, CWE-416, CWE-787) already run there.
 
 **Feasibility caveat:** Building AArch64 fixtures requires an AArch64 cross-compiler
 (`aarch64-linux-gnu-gcc`) or QEMU. Alfred's host is x86_64 — confirm toolchain

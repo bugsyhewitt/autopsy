@@ -17,7 +17,8 @@ design.
 
 > **Scope:** ELF only. Full check coverage on x86_64; the call-site-driven
 > checks (CWE-78/338/367/377/676) plus the arch-aware register-level checks
-> (CWE-732, CWE-190, CWE-134, CWE-415, CWE-369) also run on AArch64. See
+> (CWE-732, CWE-190, CWE-134, CWE-415, CWE-416, CWE-369, CWE-787) also run on
+> AArch64. See
 > [Architecture support](#architecture-support) and
 > [What autopsy is not](#what-autopsy-is-not).
 
@@ -172,7 +173,7 @@ never written from, nor applied to, a half-finished run.
 | Architecture | Checks that run |
 |---|---|
 | **x86_64 (AMD64)** | all checks (CWE-119, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787) |
-| **AArch64 (ARM64)** | the call-site-driven checks (**CWE-78**, **CWE-338**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**, **CWE-134**, **CWE-415**, **CWE-416**, **CWE-369**) |
+| **AArch64 (ARM64)** | the call-site-driven checks (**CWE-78**, **CWE-338**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**, **CWE-134**, **CWE-415**, **CWE-416**, **CWE-369**, **CWE-787**) |
 
 On an AArch64 target, the **CWE-732** permission check runs natively: its register
 reasoning only reads a single mode/mask *immediate* out of the AAPCS64 argument
@@ -210,22 +211,30 @@ knows both the x86_64 form (`div`/`idiv` single divisor operand; guard via
 operand; guard via `cbz`/`cbnz` on the divisor, or `cmp`/`tst` + `b.<cond>`), so
 it runs on AArch64 too. (ARMv8 defines divide-by-zero as `0` rather than a trap,
 so the AArch64 consequence is a silently-wrong result an attacker can force, not
-a SIGFPE — but the unguarded divisor is still the weakness.) The remaining
-register-level checks (CWE-119/476/787) rely on x86_64 stack-slot/register
-conventions, so they are **skipped** rather than producing unsound results.
-Skipped checks are listed in the report's `skipped_checks` array and noted on
-stderr:
+a SIGFPE — but the unguarded divisor is still the weakness.) The **CWE-787**
+out-of-bounds-write check is arch-aware as well: it is a call-site-driven
+malloc+copy co-location heuristic whose only register-level dependency is the
+length-literal resolver, which reads the bulk-copy *length* argument out of the
+AAPCS64 register (`x2`/`w2` for `memcpy`/`memmove`/`memset`/`strncpy`/`strncat`/
+`bcopy`) and recognizes both the x86_64 form (`mov rdx, 0x3f` immediate vs
+`[rbp-N]` reload) and the AArch64 one (`mov w2, #0x3f` / `mov x2, #0x3f` immediate
+vs `ldr`/`ldur`/`ldursw w2, [sp/x29 +N]` reload); a literal length is suppressed
+(it cannot be attacker-controlled) while a slot-reloaded length is treated as
+possibly-tainted, so it runs on AArch64 too. The remaining register-level checks
+(CWE-119/476) rely on x86_64 stack-slot/register conventions, so they are
+**skipped** rather than producing unsound results. Skipped checks are listed in
+the report's `skipped_checks` array and noted on stderr:
 
 ```bash
 autopsy --binary ./arm64-target --checks all
-# stderr: note: skipped CWE-119, CWE-476, CWE-787 (not supported on this target's architecture)
+# stderr: note: skipped CWE-119, CWE-476 (not supported on this target's architecture)
 ```
 
 ```json
 {
   "checks": [119, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787],
-  "skipped_checks": [119, 476, 787],
-  "findings": [ /* CWE-78 / 134 / 190 / 338 / 367 / 369 / 377 / 415 / 416 / 676 / 732 findings */ ]
+  "skipped_checks": [119, 476],
+  "findings": [ /* CWE-78 / 134 / 190 / 338 / 367 / 369 / 377 / 415 / 416 / 676 / 732 / 787 findings */ ]
 }
 ```
 
@@ -553,9 +562,10 @@ one attacker-controlled input source (`fgets`/`read`/`scanf`/…) in the program
 compile-time immediate (e.g. `strncpy(p, line, 63)` against `malloc(64)`) has a
 fixed, attacker-independent write extent and cannot produce a *tainted*
 out-of-bounds write — the check resolves the sink's length-argument register
-(`rdx` on x86_64 SysV) and suppresses any copy whose length is a literal. Only
-copies whose length is reloaded from a stack slot or a register (i.e. possibly
-tainted) are flagged. `strcpy` has no explicit length argument and is always
+(`rdx` on x86_64 SysV; `x2`/`w2` on AArch64 AAPCS64) and suppresses any copy
+whose length is a literal. Only copies whose length is reloaded from a stack slot
+or a register (i.e. possibly tainted) are flagged. `strcpy` has no explicit
+length argument and is always
 treated as a potential overflow sink. This is what holds the zero-false-positive
 line on the clean baseline, whose only copy is a literal-length `strncpy`.
 
@@ -583,9 +593,15 @@ autopsy --binary tests/fixtures/cwe787-vuln --checks 787 --format json
 }
 ```
 
-> The CWE-787 check uses x86_64 SysV register/stack-slot conventions (the copy
-> length argument is in `rdx`) and runs on x86_64 (AMD64) targets only; on
-> AArch64 the register-level checks are skipped.
+> **CWE-787 runs on both x86_64 and AArch64.** The detector is call-site driven;
+> its only register-level dependency is the length-literal resolver, which reads
+> the bulk-copy length argument out of the per-arch calling-convention register
+> (`rdx`/`edx` on x86_64 SysV; `x2`/`w2` on AArch64 AAPCS64) and recognizes both
+> the immediate form (`mov rdx, 0x3f` / `mov w2, #0x3f` — a literal, suppressed)
+> and the stack-slot reload (`mov rdx, [rbp-N]` / `ldr`/`ldur`/`ldursw w2, [sp/x29
+> +N]` — possibly tainted, flagged). The `tests/fixtures/cwe787-aarch64-vuln`
+> ARM64 fixture exercises it (a variable-length `memcpy` fires; a literal-length
+> `strncpy` is suppressed).
 
 ### CWE-676 — use of a potentially dangerous function
 
