@@ -36,7 +36,7 @@ all: $(BINS) aarch64
 %: %.c
 	$(CC) $(ARCH) $(CFLAGS) -o $@ $<
 
-aarch64: cwe78-aarch64-vuln cwe732-aarch64-vuln cwe190-aarch64-vuln cwe134-aarch64-vuln cwe415-aarch64-vuln cwe416-aarch64-vuln cwe369-aarch64-vuln cwe119-aarch64-vuln
+aarch64: cwe78-aarch64-vuln cwe732-aarch64-vuln cwe190-aarch64-vuln cwe134-aarch64-vuln cwe415-aarch64-vuln cwe416-aarch64-vuln cwe369-aarch64-vuln cwe119-aarch64-vuln cwe787-aarch64-vuln
 
 cwe78-aarch64-vuln: cwe78-aarch64-vuln.c cwe78-aarch64-stubs.c
 	$(AARCH64_CC) $(AARCH64_TARGET) $(AARCH64_CFLAGS) -c cwe78-aarch64-vuln.c -o cwe78-aarch64-vuln.o
@@ -124,6 +124,20 @@ cwe119-aarch64-vuln: cwe119-aarch64-vuln.c cwe119-aarch64-stubs.c
 	$(AARCH64_LD) -o $@ cwe119-aarch64-vuln.o cwe119-aarch64-stubs.o -e _start --no-dynamic-linker
 	rm -f cwe119-aarch64-vuln.o cwe119-aarch64-stubs.o
 
+# AArch64 CWE-787 fixture: exercises the arch-aware heap-OOB-write check. The
+# malloc + memcpy co-location pattern is the same shape as the x86_64 fixture;
+# the AAPCS64 length register `x2`/`w2` is loaded from a stack slot
+# (`ldr w2, [sp, #N]`) for the tainted-length copy in `copy_to_heap()` (must
+# fire), while the safe companion `safe_copy()` materializes a compile-time
+# literal length with `mov w2, #0x3f` before `bl strncpy` (must NOT fire — the
+# literal-length suppression catches it). Same freestanding cross-build recipe
+# as the others.
+cwe787-aarch64-vuln: cwe787-aarch64-vuln.c cwe787-aarch64-stubs.c
+	$(AARCH64_CC) $(AARCH64_TARGET) $(AARCH64_CFLAGS) -c cwe787-aarch64-vuln.c -o cwe787-aarch64-vuln.o
+	$(AARCH64_CC) $(AARCH64_TARGET) $(AARCH64_CFLAGS) -c cwe787-aarch64-stubs.c -o cwe787-aarch64-stubs.o
+	$(AARCH64_LD) -o $@ cwe787-aarch64-vuln.o cwe787-aarch64-stubs.o -e _start --no-dynamic-linker
+	rm -f cwe787-aarch64-vuln.o cwe787-aarch64-stubs.o
+
 clean:
 	rm -f $(BINS) cwe78-aarch64-vuln cwe78-aarch64-vuln.o cwe78-aarch64-stubs.o \
 		cwe732-aarch64-vuln cwe732-aarch64-vuln.o cwe732-aarch64-stubs.o \
@@ -132,4 +146,5 @@ clean:
 		cwe415-aarch64-vuln cwe415-aarch64-vuln.o cwe415-aarch64-stubs.o \
 		cwe416-aarch64-vuln cwe416-aarch64-vuln.o cwe416-aarch64-stubs.o \
 		cwe369-aarch64-vuln cwe369-aarch64-vuln.o cwe369-aarch64-stubs.o \
-		cwe119-aarch64-vuln cwe119-aarch64-vuln.o cwe119-aarch64-stubs.o
+		cwe119-aarch64-vuln cwe119-aarch64-vuln.o cwe119-aarch64-stubs.o \
+		cwe787-aarch64-vuln cwe787-aarch64-vuln.o cwe787-aarch64-stubs.o

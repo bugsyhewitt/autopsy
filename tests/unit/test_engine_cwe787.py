@@ -176,14 +176,103 @@ def test_unresolved_length_is_not_literal():
 # ---------------------------------------------------------------------------
 
 
-def test_non_amd64_returns_false():
+def test_unsupported_arch_returns_false():
+    # An architecture autopsy does not support (neither AMD64 nor AARCH64) must
+    # return False conservatively, regardless of the operand text.
     func = _Func("f", _insns([
-        (0x700, "mov", "x2, 0x3f"),
+        (0x700, "mov", "r2, 0x3f"),
+        (0x704, "bl", "#0x401050"),
+    ]))
+    eng = _engine("X86", [func])
+    assert eng.copy_call_length_is_literal("f", 0x704, "memcpy") is False
+
+
+# ---------------------------------------------------------------------------
+# AArch64 (AAPCS64) — arch-aware literal-length recognition.
+# memcpy/memmove/memset/strncpy/strncat/bcopy pass the length in x2 (32-bit
+# view w2). A small immediate is materialized via `mov w2, #imm`; a runtime
+# length reloads from a stack slot via `ldr w2, [sp, #N]`.
+# ---------------------------------------------------------------------------
+
+
+def test_aarch64_immediate_length_is_literal_hex():
+    # mov w2, #0x3f ; bl memcpy -> length is a compile-time literal.
+    func = _Func("f", _insns([
+        (0x700, "mov", "w2, #0x3f"),
         (0x704, "bl", "#0x401050"),
     ]))
     eng = _engine("AARCH64", [func])
-    # AArch64 is not handled (register checks are arch-gated upstream).
-    assert eng.copy_call_length_is_literal("f", 0x704, "memcpy") is False
+    assert eng.copy_call_length_is_literal("f", 0x704, "memcpy") is True
+
+
+def test_aarch64_immediate_length_is_literal_decimal():
+    func = _Func("f", _insns([
+        (0x800, "mov", "w2, #16"),
+        (0x804, "bl", "#0x401050"),
+    ]))
+    eng = _engine("AARCH64", [func])
+    assert eng.copy_call_length_is_literal("f", 0x804, "memcpy") is True
+
+
+def test_aarch64_wzr_zero_length_is_literal():
+    # mov w2, wzr encodes a literal 0 (memset(p, c, 0)) — still a compile-time
+    # constant, not attacker-controlled.
+    func = _Func("f", _insns([
+        (0x900, "mov", "w2, wzr"),
+        (0x904, "bl", "#0x401050"),
+    ]))
+    eng = _engine("AARCH64", [func])
+    assert eng.copy_call_length_is_literal("f", 0x904, "memset") is True
+
+
+def test_aarch64_stack_slot_length_is_not_literal():
+    # ldr w2, [sp, #0x10] ; bl memcpy -> runtime (possibly tainted) length.
+    func = _Func("copy_to_heap", _insns([
+        (0xa00, "ldr", "w2, [sp, #0x10]"),
+        (0xa04, "bl", "#0x401050"),
+    ]))
+    eng = _engine("AARCH64", [func])
+    assert eng.copy_call_length_is_literal("copy_to_heap", 0xa04, "memcpy") is False
+
+
+def test_aarch64_register_copy_alias_chain_is_literal():
+    # mov w3, #0x10 ; mov w2, w3 ; bl memcpy -> literal via alias chain.
+    func = _Func("f", _insns([
+        (0xb00, "mov", "w3, #0x10"),
+        (0xb04, "mov", "w2, w3"),
+        (0xb08, "bl", "#0x401050"),
+    ]))
+    eng = _engine("AARCH64", [func])
+    assert eng.copy_call_length_is_literal("f", 0xb08, "memcpy") is True
+
+
+def test_aarch64_strcpy_has_no_length_arg_never_literal():
+    # strcpy is intentionally not in the AArch64 length-reg map; never literal.
+    func = _Func("f", _insns([
+        (0xc00, "mov", "w2, #0x3f"),  # unrelated w2 set
+        (0xc04, "bl", "#0x401060"),
+    ]))
+    eng = _engine("AARCH64", [func])
+    assert eng.copy_call_length_is_literal("f", 0xc04, "strcpy") is False
+
+
+def test_aarch64_unresolved_length_is_not_literal():
+    # No discernible set of w2/x2 before the bl -> conservative False.
+    func = _Func("f", _insns([
+        (0xd00, "nop", ""),
+        (0xd04, "bl", "#0x401050"),
+    ]))
+    eng = _engine("AARCH64", [func])
+    assert eng.copy_call_length_is_literal("f", 0xd04, "memcpy") is False
+
+
+def test_aarch64_missing_call_address_returns_false():
+    func = _Func("f", _insns([
+        (0xe00, "mov", "w2, #0x3f"),
+        (0xe04, "bl", "#0x401050"),
+    ]))
+    eng = _engine("AARCH64", [func])
+    assert eng.copy_call_length_is_literal("f", 0xdead, "memcpy") is False
 
 
 def test_missing_function_returns_false():

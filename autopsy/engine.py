@@ -172,9 +172,20 @@ class AngrEngine:
     #     ``cmp``/``subs``/``tst``/``tbz``/``tbnz``/``cbz``/``cbnz``) forms, so it
     #     is sound on AArch64 too.
     #
-    # The remaining register-level checks (CWE-476/787) still rely on x86_64
-    # stack-slot/alias conventions and are skipped on AArch64.
-    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 119, 134, 190, 338, 367, 369, 377, 415, 416, 676, 732)
+    #     CWE-787 (out-of-bounds heap write via malloc + bulk-copy taint
+    #     mismatch) co-locates an allocator call and a bulk-copy/fill sink in the
+    #     same function, suppressing copies whose *length* argument is a
+    #     compile-time immediate; ``copy_call_length_is_literal`` knows both the
+    #     SysV/x86_64 (length in ``rdx``; immediate via ``mov edx, #imm``; stack
+    #     reload via ``[rbp-N]``/``[rsp-N]``) and the AArch64 (length in ``x2``;
+    #     immediate via ``mov w2, #imm`` or the ``wzr`` zero-register form; stack
+    #     reload via ``ldr w2, [sp, #N]``/``ldur``) forms, so the check runs on
+    #     AArch64 too. The call-site discovery (allocator/source/copy enumeration)
+    #     is already arch-agnostic.
+    #
+    # The remaining register-level check (CWE-476) still relies on x86_64
+    # stack-slot/alias conventions and is skipped on AArch64.
+    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 119, 134, 190, 338, 367, 369, 377, 415, 416, 676, 732, 787)
 
     def assert_supported(self) -> None:
         """Reject targets on architectures autopsy cannot analyze.
@@ -184,9 +195,10 @@ class AngrEngine:
         676) and the arch-aware register-level checks (CWE-190 integer overflow,
         CWE-732 permission assignment, CWE-134 uncontrolled format string,
         CWE-415 double-free, CWE-416 use-after-free, CWE-369 divide-by-zero,
-        CWE-119 buffer over-read/write via an attacker-controlled index); the
-        remaining register-level checks (CWE-476/787) use x86_64 register
-        conventions and report no findings on AArch64 — see
+        CWE-119 buffer over-read/write via an attacker-controlled index,
+        CWE-787 heap OOB write via the malloc+bulk-copy co-location heuristic);
+        the remaining register-level check (CWE-476) uses x86_64 register
+        conventions and reports no findings on AArch64 — see
         :meth:`checks_supported_on_arch`.
         """
         arch_name = self.project.arch.name
@@ -202,10 +214,10 @@ class AngrEngine:
 
         On x86_64 every check runs. On AArch64 only the architecture-agnostic
         checks in ``_ARCH_AGNOSTIC_CHECKS`` run — the call-site-driven ones plus
-        the arch-aware CWE-732 permission check. The remaining register-level
-        checks rely on x86_64 stack-slot/register conventions and would silently
-        mis-analyze AArch64, so they are skipped rather than producing unsound
-        results.
+        the arch-aware register-level checks (CWE-732/190/134/415/416/369/119/
+        787). The remaining register-level check (CWE-476 NULL-deref) relies on
+        x86_64 stack-slot/register conventions and would silently mis-analyze
+        AArch64, so it is skipped rather than producing unsound results.
 
         Args:
             cwes: The CWE ids the caller intends to run.
@@ -849,6 +861,21 @@ class AngrEngine:
         "bcopy": "rdx",     # bcopy(src, dst, n)
     }
 
+    # The same mapping for AArch64. AAPCS64 passes integer arguments in
+    # ``x0..x7`` (32-bit views ``w0..w7``); the *length* argument is the third
+    # parameter on every sink (``memcpy(dst, src, n)`` etc.), so it arrives in
+    # ``x2``. A small literal length is materialized into the 32-bit ``w2``
+    # view at -O0 (zero-extending into ``x2``); the 64-bit name is recorded
+    # so register-copy aliasing through either view is followed.
+    _COPY_SINK_LEN_REG_AARCH64: dict[str, str] = {
+        "memcpy": "x2",     # memcpy(dst, src, n)
+        "memmove": "x2",    # memmove(dst, src, n)
+        "memset": "x2",     # memset(dst, c, n)
+        "strncpy": "x2",    # strncpy(dst, src, n)
+        "strncat": "x2",    # strncat(dst, src, n)
+        "bcopy": "x2",      # bcopy(src, dst, n)
+    }
+
     def copy_call_length_is_literal(
         self, caller_function: str, call_address: int, sink_name: str
     ) -> bool:
@@ -868,13 +895,47 @@ class AngrEngine:
         method returns ``False`` (conservative: treat as possibly-tainted).
         ``strcpy`` (no length argument) always returns ``False``.
 
-        x86_64 only: the length-argument register mapping uses the SysV calling
-        convention. On non-AMD64 targets this returns ``False`` (the register
-        checks are arch-gated upstream and the heuristic stays conservative).
+        x86_64 (AMD64) and AArch64 (ARM64). On AArch64 the length-argument
+        register is ``x2`` (AAPCS64) and the immediate-move encoding is
+        ``mov w2, #imm`` (with ``mov w2, wzr`` encoding a literal ``0``); a
+        runtime length reloads from a stack slot (``ldr w2, [sp, #N]`` /
+        ``ldur``). On any other architecture this returns ``False`` (the
+        heuristic stays conservative).
         """
         import re
 
-        if self.project.arch.name != "AMD64":
+        arch = self.project.arch.name
+        if arch == "AARCH64":
+            len_reg = self._COPY_SINK_LEN_REG_AARCH64.get(sink_name)
+            if len_reg is None:
+                return False
+            # Reuse the arch-aware immediate resolver. A length resolved to *any*
+            # compile-time immediate (including 0) is a literal — the value does
+            # not matter for the CWE-787 suppression, only that it cannot be
+            # attacker-controlled.
+            cfg = self.cfg()
+            func = None
+            for f in cfg.kb.functions.values():
+                if f.name == caller_function:
+                    func = f
+                    break
+            if func is None:
+                return False
+            insns: list[Any] = []
+            for block in func.blocks:
+                try:
+                    insns.extend(block.capstone.insns)
+                except Exception:  # pragma: no cover - defensive
+                    continue
+            insns.sort(key=lambda i: i.address)
+            call_idx = next(
+                (i for i, ins in enumerate(insns) if ins.address == call_address),
+                None,
+            )
+            if call_idx is None:
+                return False
+            return self._resolve_arg_immediate(insns, call_idx, len_reg) is not None
+        if arch != "AMD64":
             return False
         len_reg = self._COPY_SINK_LEN_REG.get(sink_name)
         if len_reg is None:
