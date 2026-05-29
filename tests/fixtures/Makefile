@@ -16,7 +16,7 @@ CC      ?= gcc
 CFLAGS  ?= -O0 -fno-stack-protector -no-pie -g
 ARCH    ?= -m64
 
-SRCS := cwe119-vuln.c cwe190-vuln.c cwe377-vuln.c cwe415-vuln.c cwe415-interproc-vuln.c cwe416-vuln.c cwe416-interproc-vuln.c cwe78-vuln.c cwe134-vuln.c cwe676-vuln.c cwe787-vuln.c clean-baseline.c
+SRCS := cwe119-vuln.c cwe190-vuln.c cwe338-vuln.c cwe377-vuln.c cwe415-vuln.c cwe415-interproc-vuln.c cwe416-vuln.c cwe416-interproc-vuln.c cwe78-vuln.c cwe134-vuln.c cwe676-vuln.c cwe787-vuln.c clean-baseline.c
 BINS := $(SRCS:.c=)
 
 # AArch64 (ARM64) CWE-78 fixture. The host is x86_64, so the binary is built

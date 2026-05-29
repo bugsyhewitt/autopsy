@@ -13,10 +13,10 @@ from __future__ import annotations
 from typing import Any
 
 # The whole-program CWE classes autopsy detects.
-SUPPORTED_CWES: tuple[int, ...] = (119, 190, 377, 415, 416, 78, 134, 676, 787)
+SUPPORTED_CWES: tuple[int, ...] = (119, 190, 338, 377, 415, 416, 78, 134, 676, 787)
 
 # Valid tokens accepted by --checks.
-VALID_TOKENS: tuple[str, ...] = ("119", "190", "377", "415", "416", "78", "134", "676", "787", "all")
+VALID_TOKENS: tuple[str, ...] = ("119", "190", "338", "377", "415", "416", "78", "134", "676", "787", "all")
 
 # Canonical, human-readable metadata for every CWE autopsy detects. Keyed by
 # CWE id. ``name`` is the full MITRE title, ``short`` a terse label, ``uri`` the
@@ -37,6 +37,11 @@ CWE_CATALOG: dict[int, dict[str, str]] = {
         "name": "Integer Overflow or Wraparound",
         "short": "Integer Overflow",
         "uri": "https://cwe.mitre.org/data/definitions/190.html",
+    },
+    338: {
+        "name": "Use of Cryptographically Weak Pseudo-Random Number Generator (PRNG)",
+        "short": "Weak PRNG",
+        "uri": "https://cwe.mitre.org/data/definitions/338.html",
     },
     377: {
         "name": "Insecure Temporary File",
@@ -105,8 +110,8 @@ def resolve_checks(token: str) -> list[int]:
     """Resolve a ``--checks`` token into an ordered list of CWE ids.
 
     Args:
-        token: One of "119", "190", "377", "415", "416", "78", "134", "676",
-            "787", or "all".
+        token: One of "119", "190", "338", "377", "415", "416", "78", "134",
+            "676", "787", or "all".
 
     Returns:
         Ordered list of CWE ids to run. "all" expands to every supported CWE
@@ -117,7 +122,7 @@ def resolve_checks(token: str) -> list[int]:
     """
     if token == "all":
         return list(SUPPORTED_CWES)
-    if token in {"119", "190", "377", "415", "416", "78", "134", "676", "787"}:
+    if token in {"119", "190", "338", "377", "415", "416", "78", "134", "676", "787"}:
         return [int(token)]
     raise ValueError(
         f"unknown check token {token!r}; expected one of {', '.join(VALID_TOKENS)}"
