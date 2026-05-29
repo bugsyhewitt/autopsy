@@ -122,11 +122,11 @@ def test_cwe476_in_catalog():
     assert 476 in cat
 
 
-def test_cwe476_is_register_level_not_arch_agnostic():
-    """CWE-476 inspects x86_64 result/slot registers, so it is NOT arch-agnostic."""
+def test_cwe476_is_arch_agnostic_on_aarch64():
+    """CWE-476 now runs on both x86_64 and AArch64 (arch-aware register walker)."""
     from autopsy.engine import AngrEngine
 
-    assert 476 not in AngrEngine._ARCH_AGNOSTIC_CHECKS
+    assert 476 in AngrEngine._ARCH_AGNOSTIC_CHECKS
 
 
 def test_resolve_checks_476():

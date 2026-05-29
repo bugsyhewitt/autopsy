@@ -104,7 +104,7 @@ def to_sarif(report: Report) -> dict:
 
 ## Tier 2 — High value, moderate scope
 
-### 3. AArch64 (ARM64) architecture support — 🟡 PARTIAL (call-site checks + CWE-732 + CWE-190 + CWE-134 + CWE-415 + CWE-416 + CWE-369 + CWE-119 + CWE-787)
+### 3. AArch64 (ARM64) architecture support — ✅ COMPLETE (all checks arch-aware as of Rotation 31)
 
 **Status:** In progress. The v0.1 x86_64-only scope guard has been lifted —
 `assert_supported()` accepts `AARCH64`, `_resolve_call_target` parses the
@@ -153,10 +153,22 @@ register (`x2`/`w2`) for `memcpy`/`memmove`/`memset`/`strncpy`/`strncat`/
 (`ldr w2, [sp, #N]`/`ldursw`). A freestanding `tests/fixtures/cwe787-aarch64-vuln`
 fixture exercises both the vulnerable `copy_to_heap()` (memcpy with a
 stack-reloaded length — fires) and the safe `safe_copy()` (strncpy with a
-63-byte immediate length — must not fire). **Still skipped on AArch64:** the
-last stack-slot/alias register-level check (CWE-476 NULL-deref), which relies
-on x86_64 `rbp`/`rsp`/`rdi`/`rax` spill conventions. Porting it is the
-remaining work for this item.
+63-byte immediate length — must not fire). **CWE-476 (NULL-pointer
+dereference) is now arch-aware too** (Rotation 31), closing the AArch64
+porting work for this item: the engine helper
+`AngrEngine.unchecked_alloc_dereferences` now dispatches by architecture and
+carries a parallel AArch64 walker (`_unchecked_alloc_dereferences_aarch64` +
+`_record_unchecked_deref_aarch64`) that tracks the allocator's return
+register `x0` into a stack slot (`str x0, [sp, #N]` / `[x29, #N]`), follows
+alias propagation through slot reloads (`ldr xR, [sp, #N]`) and
+register-to-register copies (`mov xA, xB`), and recognizes the AArch64
+NULL-check guard idioms — `cbz` / `cbnz` on a slot-aliased register, and
+`cmp xR, #0` / `cmp xR, xzr` / `tst xR, xR` followed by `b.<cond>`. A
+freestanding `tests/fixtures/cwe476-aarch64-vuln` fixture exercises both the
+vulnerable `risky_fill()` (unchecked malloc deref — fires) and the safe
+`safe_fill()` / `safe_env()` companions (each `cbnz`-guarded — must not
+fire). With CWE-476 ported, **every** register-level check is arch-aware and
+nothing is skipped on AArch64.
 
 **What it is:** Lift the v0.1 x86_64-only scope guard to also accept
 `aarch64`/`arm64` ELF binaries.
@@ -179,10 +191,11 @@ remaining work for this item.
   register and so needed arch-aware mnemonic/register recognition for AArch64 —
   now shipped via `size_arith_before_call`. CWE-732 and CWE-190 are the two
   register-level checks made arch-aware so far.)
-- Remaining Phase 2 scope: port the last stack-slot/alias register-level check
-  (CWE-476 NULL-deref) to AArch64; the call-site checks and the arch-aware
-  register-level checks (CWE-732, CWE-190, CWE-134, CWE-369, CWE-415, CWE-416,
-  CWE-119, CWE-787) already run there.
+- Remaining Phase 2 scope: **none** — every register-level check
+  (CWE-732, CWE-190, CWE-134, CWE-369, CWE-415, CWE-416, CWE-119, CWE-787,
+  CWE-476) and every call-site-driven check now runs on AArch64. The
+  AArch64-on-AArch64 native install path (rather than the freestanding
+  cross-build used for fixtures) is a separate, optional follow-on.
 
 **Feasibility caveat:** Building AArch64 fixtures requires an AArch64 cross-compiler
 (`aarch64-linux-gnu-gcc`) or QEMU. Alfred's host is x86_64 — confirm toolchain

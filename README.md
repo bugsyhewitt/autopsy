@@ -15,11 +15,11 @@ attacker-controlled sources to dangerous sinks, and pointer lifetimes both
 within a function and across a single call hop. It is slower and deeper by
 design.
 
-> **Scope:** ELF only. Full check coverage on x86_64; the call-site-driven
-> checks (CWE-78/338/367/377/676) plus the arch-aware register-level checks
-> (CWE-732, CWE-190, CWE-134, CWE-415, CWE-416, CWE-369, CWE-119) also run on
-> AArch64. See [Architecture support](#architecture-support) and
-> [What autopsy is not](#what-autopsy-is-not).
+> **Scope:** ELF only. Full check coverage on x86_64; every check (the
+> call-site-driven CWE-78/338/367/377/676 plus the arch-aware register-level
+> CWE-732, CWE-190, CWE-134, CWE-415, CWE-416, CWE-369, CWE-119, CWE-787,
+> CWE-476) also runs on AArch64. See [Architecture support](#architecture-support)
+> and [What autopsy is not](#what-autopsy-is-not).
 
 ---
 
@@ -172,7 +172,7 @@ never written from, nor applied to, a half-finished run.
 | Architecture | Checks that run |
 |---|---|
 | **x86_64 (AMD64)** | all checks (CWE-119, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787) |
-| **AArch64 (ARM64)** | the call-site-driven checks (**CWE-78**, **CWE-338**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**, **CWE-134**, **CWE-415**, **CWE-416**, **CWE-369**, **CWE-119**, **CWE-787**) |
+| **AArch64 (ARM64)** | all checks — the call-site-driven checks (**CWE-78**, **CWE-338**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**, **CWE-134**, **CWE-415**, **CWE-416**, **CWE-369**, **CWE-119**, **CWE-787**, **CWE-476**) |
 
 On an AArch64 target, the **CWE-732** permission check runs natively: its register
 reasoning only reads a single mode/mask *immediate* out of the AAPCS64 argument
@@ -230,21 +230,25 @@ the AAPCS64 length-argument register (`x2`/`w2`) for `memcpy`/`memmove`/
 copy site is suppressed), while a stack-slot reload (`ldr w2, [sp, #N]` /
 `ldursw`) is treated as a possibly-tainted runtime length (the copy site
 fires), so it runs on AArch64 too (the `tests/fixtures/cwe787-aarch64-vuln`
-ARM64 fixture exercises both sides). The remaining register-level check
-(CWE-476 NULL-deref) relies on x86_64 stack-slot/register conventions, so it
-is **skipped** rather than producing unsound results. Skipped checks are
-listed in the report's `skipped_checks` array and noted on stderr:
-
-```bash
-autopsy --binary ./arm64-target --checks all
-# stderr: note: skipped CWE-476 (not supported on this target's architecture)
-```
+ARM64 fixture exercises both sides). The **CWE-476** NULL-pointer-dereference
+check is arch-aware as well: it locates the spill of the allocator's return
+register into a stack slot, follows alias propagation through slot reloads and
+register-to-register copies, and reports the first dereference through an
+aliasing register unless a NULL-check guard intervenes; the engine knows both
+the x86_64 form (`rax` return; `mov [rbp-N], rax` spill; `test reg, reg` /
+`cmp reg, 0` + conditional-jump guard) and the AArch64 one (`x0` return;
+`str x0, [sp,#N]` / `[x29,#N]` spill; `cbz` / `cbnz` on a slot-aliased
+register, or `cmp xR, #0` / `cmp xR, xzr` / `tst xR, xR` + `b.<cond>` guard),
+so it runs on AArch64 too (the `tests/fixtures/cwe476-aarch64-vuln` ARM64
+fixture exercises both sides). With CWE-476 ported, **every** register-level
+check is arch-aware and nothing is skipped on AArch64. The report's
+`skipped_checks` array is empty on a supported architecture:
 
 ```json
 {
   "checks": [119, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787],
-  "skipped_checks": [476],
-  "findings": [ /* CWE-78 / 119 / 134 / 190 / 338 / 367 / 369 / 377 / 415 / 416 / 676 / 732 / 787 findings */ ]
+  "skipped_checks": [],
+  "findings": [ /* CWE-78 / 119 / 134 / 190 / 338 / 367 / 369 / 377 / 415 / 416 / 476 / 676 / 732 / 787 findings */ ]
 }
 ```
 

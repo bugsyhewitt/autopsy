@@ -28,10 +28,16 @@ dereference of an allocator result is a strong structural signal, but the
 register-level slot tracking does not constitute a full def-use proof that the
 specific faulting access is the same pointer on every path.
 
-x86_64 only: the result register (``rax``) and slot/guard reasoning rely on
-x86_64 SysV conventions and -O0 codegen. The engine returns an empty list on
-other architectures, so this check yields no findings on AArch64 (it is
-excluded from the architecture-agnostic set and skipped upstream).
+Arch-aware (x86_64 + AArch64). The engine helper carries two parallel walkers
+that share the same algorithm — spill the allocator's return register into a
+stack slot, follow alias propagation through slot reloads and register copies,
+report the first dereference through an aliasing register unless a NULL-check
+guard intervenes. The x86_64 (SysV) walker uses ``rax``, ``mov [rbp-N], rax``
+spills, and ``test``/``cmp`` + conditional-jump guards. The AArch64 (AAPCS64)
+walker uses ``x0``, ``str x0, [sp,#N]``/``[x29,#N]`` spills, and the AArch64
+guard idioms (``cbz``/``cbnz`` on a slot-aliased register, or
+``cmp xR, #0``/``cmp xR, xzr``/``tst xR, xR`` followed by ``b.<cond>``). On any
+other architecture the engine returns an empty list and this check stays silent.
 """
 
 from __future__ import annotations

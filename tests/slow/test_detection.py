@@ -685,25 +685,69 @@ def test_aarch64_runs_cwe787_under_all(require_angr, fixtures_dir):
     )
 
 
-def test_aarch64_skips_register_level_checks(require_angr, fixtures_dir):
-    # On AArch64, the remaining x86_64-only register-level check (CWE-476
-    # NULL-deref) is skipped rather than producing unsound results; the
-    # arch-agnostic checks — including the arch-aware CWE-119/732/190/134/415/
-    # 416/369/787 — still run.
+def test_cwe476_detected_on_aarch64(require_angr, fixtures_dir):
+    # AArch64 (ARM64) support for the arch-aware CWE-476 NULL-dereference
+    # check: the allocator's return register `x0` is spilled to a stack slot
+    # (`str x0, [sp, #N]` / `[x29, #N]`), reloaded into an alias register
+    # (`ldr xR, [sp, #N]`), and dereferenced through that base register
+    # (`str wzr, [xR]`) with no NULL-check guard. The AArch64 guard recognizer
+    # accepts `cbz`/`cbnz` on a slot-aliased register and `cmp xR, #0` /
+    # `cmp xR, xzr` / `tst xR, xR` + `b.<cond>`. The vulnerable risky_fill()
+    # fires (no guard); the safe_fill() and safe_env() companions must NOT fire
+    # (each guards the reloaded result with a `cbnz`).
+    rep = _analyze(fixtures_dir, "cwe476-aarch64-vuln", "476")
+    d = rep.to_dict()
+    assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
+    cwe476 = [f for f in d["findings"] if f["cwe"] == 476]
+    assert cwe476, f"expected a CWE-476 finding on aarch64, got {d['findings']}"
+    for f in cwe476:
+        _assert_finding_contract(f, 476)
+    funcs = {f["function"] for f in cwe476}
+    assert "risky_fill" in funcs, (
+        f"unchecked malloc deref in risky_fill not flagged on aarch64: {cwe476}"
+    )
+    # The NULL-checked malloc result in safe_fill() must NOT fire — the AArch64
+    # cbnz guard recognizer catches it.
+    assert "safe_fill" not in funcs, (
+        f"NULL-checked malloc in safe_fill must not fire on aarch64: {cwe476}"
+    )
+    # The NULL-checked getenv() result in safe_env() must NOT fire either.
+    assert "safe_env" not in funcs, (
+        f"NULL-checked getenv in safe_env must not fire on aarch64: {cwe476}"
+    )
+    # Medium confidence (same as x86_64): a strong structural signal but not a
+    # full def-use proof of the faulting pointer on every path.
+    risky = next(f for f in cwe476 if f["function"] == "risky_fill")
+    assert risky["confidence"] == "medium"
+
+
+def test_aarch64_runs_cwe476_under_all(require_angr, fixtures_dir):
+    # Under "all" on AArch64, CWE-476 now runs (it is no longer in the skipped
+    # set) and its findings surface alongside the other register-level checks.
+    rep = _analyze(fixtures_dir, "cwe476-aarch64-vuln", "all")
+    d = rep.to_dict()
+    assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
+    assert 476 not in d["skipped_checks"], (
+        f"CWE-476 should run on AArch64, but was skipped: {d['skipped_checks']}"
+    )
+    assert any(f["cwe"] == 476 for f in d["findings"]), (
+        f"expected CWE-476 findings under 'all' on aarch64: {d['findings']}"
+    )
+
+
+def test_aarch64_runs_all_register_level_checks(require_angr, fixtures_dir):
+    # On AArch64, every register-level check now runs — CWE-476 was the last
+    # x86_64-only register-level check and has been ported. The skipped set is
+    # empty on a supported architecture.
     rep = _analyze(fixtures_dir, "cwe78-aarch64-vuln", "all")
     d = rep.to_dict()
     assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
-    assert set(d["skipped_checks"]) == {476}
-    # CWE-119/732/190/134/415/416/369/787 are arch-aware and must NOT be
-    # skipped on AArch64.
-    assert 119 not in d["skipped_checks"]
-    assert 732 not in d["skipped_checks"]
-    assert 190 not in d["skipped_checks"]
-    assert 134 not in d["skipped_checks"]
-    assert 415 not in d["skipped_checks"]
-    assert 416 not in d["skipped_checks"]
-    assert 369 not in d["skipped_checks"]
-    assert 787 not in d["skipped_checks"]
+    assert d["skipped_checks"] == [], (
+        f"expected no skipped checks on AArch64, got: {d['skipped_checks']}"
+    )
+    # All previously-arch-aware checks remain runnable.
+    for cwe in (119, 732, 190, 134, 415, 416, 369, 787, 476):
+        assert cwe not in d["skipped_checks"]
     # The CWE-78 finding still surfaces under "all".
     assert any(f["cwe"] == 78 for f in d["findings"])
 
@@ -748,6 +792,7 @@ def test_max_states_high_completes_all_fixtures(require_angr, fixtures_dir):
         ("cwe676-vuln", 676),
         ("cwe732-vuln", 732),
         ("cwe787-vuln", 787),
+        ("cwe476-aarch64-vuln", 476),
     ]:
         rep = analyze(binary=str(fixtures_dir / name), checks_token=str(cwe),
                       max_states=1000)
