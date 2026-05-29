@@ -349,13 +349,60 @@ def test_cwe78_detected_on_aarch64(require_angr, fixtures_dir):
     assert cwe78[0]["confidence"] == "medium"
 
 
+def test_cwe732_detected_on_aarch64(require_angr, fixtures_dir):
+    # AArch64 (ARM64) support for the arch-aware register-level CWE-732 check:
+    # the chmod/umask mode immediate is read out of the AAPCS64 argument
+    # register (w1 for chmod, w0 for umask, including the `mov w0, wzr`
+    # zero-register encoding of umask(0)) at each `bl` call site — mirroring the
+    # x86_64 behavior. The same vulnerable/safe function split as the x86_64
+    # fixture must hold (zero false positives on the restrictive modes).
+    rep = _analyze(fixtures_dir, "cwe732-aarch64-vuln", "732")
+    d = rep.to_dict()
+    assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
+    cwe732 = [f for f in d["findings"] if f["cwe"] == 732]
+    assert cwe732, f"expected CWE-732 findings on aarch64, got {d['findings']}"
+    for f in cwe732:
+        _assert_finding_contract(f, 732)
+    funcs = {f["function"] for f in cwe732}
+    assert "expose_secret" in funcs, f"chmod(0777) not flagged on aarch64: {cwe732}"
+    assert "widen_shared" in funcs, f"chmod(0666) not flagged on aarch64: {cwe732}"
+    assert "loose_umask" in funcs, f"umask(0) not flagged on aarch64: {cwe732}"
+    # The restrictive owner-only modes must never be flagged (zero false positives).
+    assert "lock_down" not in funcs, f"chmod(0600) must not fire on aarch64: {cwe732}"
+    assert "tight_umask" not in funcs, f"umask(0077) must not fire on aarch64: {cwe732}"
+    # chmod literal -> high confidence; umask policy -> medium (same as x86_64).
+    chmod_findings = [f for f in cwe732 if f["function"] in ("expose_secret", "widen_shared")]
+    assert chmod_findings and all(f["confidence"] == "high" for f in chmod_findings)
+    umask_findings = [f for f in cwe732 if f["function"] == "loose_umask"]
+    assert umask_findings and umask_findings[0]["confidence"] == "medium"
+    assert "0o777" in " ".join(f["evidence"] for f in cwe732)
+
+
+def test_aarch64_runs_cwe732_under_all(require_angr, fixtures_dir):
+    # Under "all" on AArch64, CWE-732 now runs (it is no longer in the skipped
+    # set) and its findings surface alongside the call-site-driven checks.
+    rep = _analyze(fixtures_dir, "cwe732-aarch64-vuln", "all")
+    d = rep.to_dict()
+    assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
+    # CWE-732 must NOT appear in the skipped set on AArch64 anymore.
+    assert 732 not in d["skipped_checks"], (
+        f"CWE-732 should run on AArch64, but was skipped: {d['skipped_checks']}"
+    )
+    assert any(f["cwe"] == 732 for f in d["findings"]), (
+        f"expected CWE-732 findings under 'all' on aarch64: {d['findings']}"
+    )
+
+
 def test_aarch64_skips_register_level_checks(require_angr, fixtures_dir):
-    # On AArch64, the register-level checks (CWE-119/415/416/787) are skipped
-    # rather than producing unsound results; CWE-78/190 still run.
+    # On AArch64, the x86_64-only register-level checks (CWE-119/369/415/416/
+    # 476/134/787) are skipped rather than producing unsound results; the
+    # arch-agnostic checks — including the arch-aware CWE-732 — still run.
     rep = _analyze(fixtures_dir, "cwe78-aarch64-vuln", "all")
     d = rep.to_dict()
     assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
-    assert set(d["skipped_checks"]) == {119, 369, 415, 416, 476, 134, 732, 787}
+    assert set(d["skipped_checks"]) == {119, 369, 415, 416, 476, 134, 787}
+    # CWE-732 is arch-aware and must NOT be skipped on AArch64.
+    assert 732 not in d["skipped_checks"]
     # The CWE-78 finding still surfaces under "all".
     assert any(f["cwe"] == 78 for f in d["findings"])
 

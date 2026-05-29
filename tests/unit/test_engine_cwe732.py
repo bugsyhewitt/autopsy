@@ -190,9 +190,10 @@ def test_chmod_runtime_mode_not_flagged():
     assert eng.chmod_calls_with_permissive_mode() == []
 
 
-def test_chmod_returns_empty_on_non_amd64():
+def test_chmod_returns_empty_on_unsupported_arch():
+    # Neither x86_64 nor AArch64: the helper resolves no register map -> empty.
     caller, sink_addr, sink = _chmod_func("0x1ff")
-    eng = _engine(_funcs_with_sink(caller, sink, sink_addr), arch_name="AARCH64")
+    eng = _engine(_funcs_with_sink(caller, sink, sink_addr), arch_name="MIPS32")
     assert eng.chmod_calls_with_permissive_mode() == []
 
 
@@ -266,7 +267,145 @@ def test_umask_runtime_mask_not_flagged():
     assert eng.umask_calls_with_permissive_mask() == []
 
 
-def test_umask_returns_empty_on_non_amd64():
+def test_umask_returns_empty_on_unsupported_arch():
     funcs, _ = _umask_func("0x0")
+    eng = _engine(funcs, arch_name="PPC64")
+    assert eng.umask_calls_with_permissive_mask() == []
+
+
+# ---------------------------------------------------------------------------
+# AArch64 (ARM64) — the arch-aware register-level path
+# ---------------------------------------------------------------------------
+#
+# AArch64 codegen (capstone Intel-free syntax): the mode/mask literal is
+# materialized into the 32-bit w-view of the argument register just before the
+# `bl` call — `mov w1, #0x1ff ; bl chmod` — and `umask(0)` is encoded with the
+# zero register, `mov w0, wzr ; bl umask`. The mode register is x1/w1 for
+# chmod/fchmod/lchmod, x2/w2 for fchmodat, x0/w0 for umask.
+
+
+def _chmod_func_aarch64(mode_imm, mode_reg="w1", base=0x401100, name="setup",
+                        sink="chmod", sink_addr=0x402000):
+    """An AArch64 function: set the mode w-register to an immediate, then `bl`."""
+    insns = [
+        _Insn(base + 0x0, "ldr", "x0, [sp, #0x8]"),       # path arg reload
+        _Insn(base + 0x4, "mov", f"{mode_reg}, {mode_imm}"),  # mode literal
+        _Insn(base + 0x8, "bl", hex(sink_addr)),
+        _Insn(base + 0xC, "ret", ""),
+    ]
+    return _Func(base, name, insns), sink_addr, sink
+
+
+def test_aarch64_chmod_0777_flagged():
+    caller, sink_addr, sink = _chmod_func_aarch64("#0x1ff")  # 0o777
+    eng = _engine(_funcs_with_sink(caller, sink, sink_addr), arch_name="AARCH64")
+    sites = eng.chmod_calls_with_permissive_mode()
+    assert len(sites) == 1
+    assert sites[0]["function"] == "setup"
+    assert sites[0]["sink_name"] == "chmod"
+    assert sites[0]["mode"] == 0o777
+    assert sites[0]["address"] == 0x401100 + 0x8
+
+
+def test_aarch64_chmod_0666_decimal_flagged():
+    # capstone renders AArch64 immediates sometimes in decimal: 438 == 0o666.
+    caller, sink_addr, sink = _chmod_func_aarch64("#438")
+    eng = _engine(_funcs_with_sink(caller, sink, sink_addr), arch_name="AARCH64")
+    sites = eng.chmod_calls_with_permissive_mode()
+    assert len(sites) == 1 and sites[0]["mode"] == 0o666
+
+
+def test_aarch64_chmod_owner_only_not_flagged():
+    # 0o600 = 0x180: neither group- nor world-write -> safe.
+    caller, sink_addr, sink = _chmod_func_aarch64("#0x180")
+    eng = _engine(_funcs_with_sink(caller, sink, sink_addr), arch_name="AARCH64")
+    assert eng.chmod_calls_with_permissive_mode() == []
+
+
+def test_aarch64_fchmodat_uses_w2_mode_register():
+    # fchmodat(dirfd, path, mode, flags): mode is in x2/w2 on AAPCS64.
+    caller, sink_addr, sink = _chmod_func_aarch64("#0x1ff", mode_reg="w2",
+                                                  sink="fchmodat", name="recurse")
+    eng = _engine(_funcs_with_sink(caller, sink, sink_addr), arch_name="AARCH64")
+    sites = eng.chmod_calls_with_permissive_mode()
+    assert len(sites) == 1
+    assert sites[0]["sink_name"] == "fchmodat"
+    assert sites[0]["mode"] == 0o777
+
+
+def test_aarch64_chmod_runtime_mode_not_flagged():
+    # Mode loaded from a stack slot (ldr) is a runtime value -> not flagged.
+    base = 0x401300
+    sink_addr = 0x402000
+    insns = [
+        _Insn(base + 0x0, "ldr", "w1, [sp, #0x4]"),   # mode from memory
+        _Insn(base + 0x4, "bl", hex(sink_addr)),
+    ]
+    caller = _Func(base, "dynamic", insns)
+    sink = _Func(sink_addr, "chmod", [_Insn(sink_addr, "b", "0x0")], is_plt=True)
+    eng = _engine([caller, sink], arch_name="AARCH64")
+    assert eng.chmod_calls_with_permissive_mode() == []
+
+
+def test_aarch64_chmod_follows_register_copy_alias():
+    # `mov w1, w8 ; ... ; mov w8, #0x1ff` — alias propagation through a copy.
+    base = 0x401700
+    sink_addr = 0x402000
+    insns = [
+        _Insn(base + 0x0, "mov", "w8, #0x1ff"),   # literal into a scratch reg
+        _Insn(base + 0x4, "mov", "w1, w8"),       # copied into the mode reg
+        _Insn(base + 0x8, "bl", hex(sink_addr)),
+    ]
+    caller = _Func(base, "aliased", insns)
+    sink = _Func(sink_addr, "chmod", [_Insn(sink_addr, "b", "0x0")], is_plt=True)
+    eng = _engine([caller, sink], arch_name="AARCH64")
+    sites = eng.chmod_calls_with_permissive_mode()
+    assert len(sites) == 1 and sites[0]["mode"] == 0o777
+
+
+def _umask_func_aarch64(mask_op, base=0x401500, name="init", sink_addr=0x402100):
+    insns = [
+        _Insn(base + 0x0, "mov", f"w0, {mask_op}"),
+        _Insn(base + 0x4, "bl", hex(sink_addr)),
+        _Insn(base + 0x8, "ret", ""),
+    ]
+    caller = _Func(base, name, insns)
+    sink = _Func(sink_addr, "umask", [_Insn(sink_addr, "b", "0x0")], is_plt=True)
+    return [caller, sink], base + 0x4
+
+
+def test_aarch64_umask_zero_register_flagged():
+    # `mov w0, wzr ; bl umask` — the zero register encodes umask(0).
+    funcs, call_addr = _umask_func_aarch64("wzr")
     eng = _engine(funcs, arch_name="AARCH64")
+    sites = eng.umask_calls_with_permissive_mask()
+    assert len(sites) == 1
+    assert sites[0]["sink_name"] == "umask"
+    assert sites[0]["mode"] == 0
+    assert sites[0]["address"] == call_addr
+
+
+def test_aarch64_umask_partial_mask_flagged():
+    # 0o002 strips only world-write; group-write left unmasked -> flagged.
+    funcs, _ = _umask_func_aarch64("#0x2")
+    eng = _engine(funcs, arch_name="AARCH64")
+    assert len(eng.umask_calls_with_permissive_mask()) == 1
+
+
+def test_aarch64_umask_0077_not_flagged():
+    funcs, _ = _umask_func_aarch64("#0x3f")  # 0o077
+    eng = _engine(funcs, arch_name="AARCH64")
+    assert eng.umask_calls_with_permissive_mask() == []
+
+
+def test_aarch64_umask_runtime_mask_not_flagged():
+    base = 0x401600
+    sink_addr = 0x402100
+    insns = [
+        _Insn(base + 0x0, "ldr", "w0, [sp, #0x4]"),
+        _Insn(base + 0x4, "bl", hex(sink_addr)),
+    ]
+    caller = _Func(base, "dynmask", insns)
+    sink = _Func(sink_addr, "umask", [_Insn(sink_addr, "b", "0x0")], is_plt=True)
+    eng = _engine([caller, sink], arch_name="AARCH64")
     assert eng.umask_calls_with_permissive_mask() == []

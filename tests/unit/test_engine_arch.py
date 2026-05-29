@@ -57,13 +57,22 @@ def test_amd64_runs_every_check():
     assert skipped == []
 
 
-def test_aarch64_runs_only_call_site_checks():
+def test_aarch64_runs_only_arch_agnostic_checks():
     eng = _engine_for_arch("AARCH64")
     runnable, skipped = eng.checks_supported_on_arch([119, 190, 415, 416, 78, 787])
-    # Only the call-site-driven checks run on AArch64.
+    # Only the arch-agnostic checks run on AArch64.
     assert runnable == [190, 78]
-    # The register-level checks are recorded as skipped, not silently dropped.
+    # The x86_64-only register-level checks are recorded as skipped, not dropped.
     assert skipped == [119, 415, 416, 787]
+
+
+def test_aarch64_runs_cwe732_permission_check():
+    # CWE-732 is the arch-aware register-level check: it reads only an immediate
+    # mode/mask out of the AAPCS64 argument register, so it runs on AArch64.
+    eng = _engine_for_arch("AARCH64")
+    runnable, skipped = eng.checks_supported_on_arch([732, 119, 78])
+    assert runnable == [732, 78]
+    assert skipped == [119]
 
 
 def test_aarch64_partition_preserves_request_order():

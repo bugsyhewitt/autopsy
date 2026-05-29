@@ -9,12 +9,15 @@ subsequently creates) writable by users other than its owner, which is exactly
 the weakness CWE-732 names: an attacker with a local account can tamper with a
 config file, a key, a log, or a setuid helper that should have been owner-only.
 
-The mode/mask is read directly out of the call's argument register (SysV
-x86_64: ``rsi`` for ``chmod``/``fchmod``/``lchmod``, ``rdx`` for ``fchmodat``,
-``rdi`` for ``umask``). The engine helpers
-:meth:`AngrEngine.chmod_calls_with_permissive_mode` and
-:meth:`AngrEngine.umask_calls_with_permissive_mask` resolve the immediate by
-walking back from the call site through the (small, -O0) instruction window.
+The mode/mask is read directly out of the call's argument register. The register
+mapping is per-architecture — SysV x86_64 (``rsi`` for ``chmod``/``fchmod``/
+``lchmod``, ``rdx`` for ``fchmodat``, ``rdi`` for ``umask``) and AAPCS64 AArch64
+(``x1`` for ``chmod``/``fchmod``/``lchmod``, ``x2`` for ``fchmodat``, ``x0`` for
+``umask``). The engine helpers :meth:`AngrEngine.chmod_calls_with_permissive_mode`
+and :meth:`AngrEngine.umask_calls_with_permissive_mask` resolve the immediate by
+walking back from the call site through the (small, -O0) instruction window,
+handling both the x86_64 ``mov esi, 0x1ff`` form and the AArch64 ``mov w1, #0x1ff``
+form (plus the ``mov w0, wzr`` zero-register encoding of ``umask(0)``).
 
 Zero-false-positive posture: a mode/mask that is *computed at runtime* (loaded
 from a stack slot or another register) has an unknown value, so it is never
@@ -25,10 +28,12 @@ silent too. Unlike the taint-flow checks (CWE-78/134), CWE-732 needs no
 attacker-input source: an over-permissive permission literal is the weakness
 itself regardless of any input path — exactly how MITRE frames CWE-732.
 
-x86_64 only: the mode/mask-argument register reasoning relies on x86_64 SysV
-register conventions, so the engine helpers return nothing on other
-architectures and this check yields no findings on AArch64 (it is excluded from
-the architecture-agnostic set and skipped upstream).
+x86_64 (AMD64) and AArch64 (ARM64): the mode/mask-argument register reasoning is
+arch-aware (it knows both the SysV and AAPCS64 argument registers and the per-arch
+immediate-move encoding), so unlike the other register-level checks CWE-732 runs
+on AArch64 too. It is therefore included in the engine's arch-agnostic check set
+and is *not* skipped on AArch64. The engine helpers return nothing on any other
+architecture (e.g. MIPS/PPC), so the check is silent there.
 """
 
 from __future__ import annotations
