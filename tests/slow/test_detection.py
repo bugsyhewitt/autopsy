@@ -233,6 +233,26 @@ def test_cwe338_detected(require_angr, fixtures_dir):
     assert all(f["confidence"] == "medium" for f in cwe338)
 
 
+def test_cwe369_detected(require_angr, fixtures_dir):
+    # Divide by zero: risky_ratio() divides by an attacker-controlled divisor
+    # with no zero-check; safe_ratio() guards the divisor and must NOT fire.
+    rep = _analyze(fixtures_dir, "cwe369-vuln", "369")
+    d = rep.to_dict()
+    assert d["error"] is None
+    cwe369 = [f for f in d["findings"] if f["cwe"] == 369]
+    assert cwe369, f"expected a CWE-369 finding, got {d['findings']}"
+    vuln = [f for f in cwe369 if f["function"] == "risky_ratio"]
+    assert vuln, f"expected the divide-by-zero in risky_ratio(), got {cwe369}"
+    _assert_finding_contract(vuln[0], 369)
+    # The guarded division in safe_ratio must never be flagged.
+    assert all(f["function"] != "safe_ratio" for f in cwe369), (
+        f"the zero-checked division in safe_ratio must not fire: {cwe369}"
+    )
+    # Unguarded divisor + input source -> medium confidence.
+    assert vuln[0]["confidence"] == "medium"
+    assert "atoi" in vuln[0]["evidence"] or "fgets" in vuln[0]["evidence"]
+
+
 def test_cwe78_detected_on_aarch64(require_angr, fixtures_dir):
     # AArch64 (ARM64) support: the call-site-driven CWE-78 check must fire on a
     # `bl` (branch-with-link) call to system() fed by an fgets() source, exactly
@@ -253,7 +273,7 @@ def test_aarch64_skips_register_level_checks(require_angr, fixtures_dir):
     rep = _analyze(fixtures_dir, "cwe78-aarch64-vuln", "all")
     d = rep.to_dict()
     assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
-    assert set(d["skipped_checks"]) == {119, 415, 416, 134, 787}
+    assert set(d["skipped_checks"]) == {119, 369, 415, 416, 134, 787}
     # The CWE-78 finding still surfaces under "all".
     assert any(f["cwe"] == 78 for f in d["findings"])
 
@@ -285,6 +305,7 @@ def test_max_states_high_completes_all_fixtures(require_angr, fixtures_dir):
         ("cwe119-vuln", 119),
         ("cwe190-vuln", 190),
         ("cwe338-vuln", 338),
+        ("cwe369-vuln", 369),
         ("cwe377-vuln", 377),
         ("cwe415-vuln", 415),
         ("cwe415-interproc-vuln", 415),

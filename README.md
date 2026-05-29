@@ -170,23 +170,23 @@ never written from, nor applied to, a half-finished run.
 
 | Architecture | Checks that run |
 |---|---|
-| **x86_64 (AMD64)** | all checks (CWE-119, 190, 338, 377, 415, 416, 78, 134, 676, 787) |
+| **x86_64 (AMD64)** | all checks (CWE-119, 190, 338, 369, 377, 415, 416, 78, 134, 676, 787) |
 | **AArch64 (ARM64)** | the call-site-driven checks: **CWE-78**, **CWE-190**, **CWE-338**, **CWE-377** and **CWE-676** |
 
-On an AArch64 target, the register-level checks (CWE-119/415/416/134/787) rely on
-x86_64 register conventions, so they are **skipped** rather than producing
-unsound results. Skipped checks are listed in the report's `skipped_checks`
-array and noted on stderr:
+On an AArch64 target, the register-level checks (CWE-119/369/415/416/134/787)
+rely on x86_64 register conventions, so they are **skipped** rather than
+producing unsound results. Skipped checks are listed in the report's
+`skipped_checks` array and noted on stderr:
 
 ```bash
 autopsy --binary ./arm64-target --checks all
-# stderr: note: skipped CWE-119, CWE-415, CWE-416, CWE-134, CWE-787 (not supported on this target's architecture)
+# stderr: note: skipped CWE-119, CWE-369, CWE-415, CWE-416, CWE-134, CWE-787 (not supported on this target's architecture)
 ```
 
 ```json
 {
-  "checks": [119, 190, 338, 377, 415, 416, 78, 134, 676, 787],
-  "skipped_checks": [119, 415, 416, 134, 787],
+  "checks": [119, 190, 338, 369, 377, 415, 416, 78, 134, 676, 787],
+  "skipped_checks": [119, 369, 415, 416, 134, 787],
   "findings": [ /* CWE-78 / CWE-190 / CWE-338 / CWE-377 / CWE-676 findings */ ]
 }
 ```
@@ -629,6 +629,51 @@ autopsy --binary tests/fixtures/cwe338-vuln --checks 338 --format json
     {"address": "0x4011b9", "description": "use of cryptographically weak PRNG rand()"}
   ],
   "evidence": "call to weak PRNG rand() in weak_token: rand() is a predictable non-cryptographic PRNG; its output can be reconstructed from the seed; prefer getrandom / arc4random",
+  "confidence": "medium"
+}
+```
+
+### CWE-369 — divide by zero
+
+An integer division (`div`/`idiv`) whose divisor is **not** guarded by a
+zero-check, in a program that reads attacker-controlled input. On x86_64 `div`
+and `idiv` take a single explicit operand — the divisor — and the CPU raises a
+divide-error exception (#DE, delivered as `SIGFPE`) when it is zero. If an
+attacker can drive that divisor to zero — the classic `x / atoi(user_input)`
+with no `if (d == 0)` check — the process crashes: the denial-of-service
+weakness CWE-369 names.
+
+The check walks each function for division instructions and **excludes** any
+whose divisor register is the subject of a preceding `cmp`/`test` followed by a
+conditional branch — i.e. a guard like `if (d == 0) return;`. Excluding guarded
+divisions is what holds the zero-false-positive line: a program that checks its
+divisor is not vulnerable and is never flagged (the `safe_ratio` companion in
+the fixture is silent). An attacker-controlled input source
+(`fgets`/`scanf`/`read`/`atoi`/`strtol`…) must also be present — a divisor the
+program never sourced from input cannot be driven to zero by an attacker.
+
+Findings carry `confidence: "medium"`: an unguarded divisor co-located with an
+input source is a strong structural signal, but the check does not prove a
+register-level def-use chain from the specific read to the divisor.
+
+This is a **register-level** detector (it inspects the divisor operand and the
+x86_64 guard instructions), so it runs on **x86_64 only** and is skipped on
+AArch64.
+
+```bash
+autopsy --binary tests/fixtures/cwe369-vuln --checks 369 --format json
+```
+
+```json
+{
+  "cwe": 369,
+  "function": "risky_ratio",
+  "address": "0x401154",
+  "taint_trace": [
+    {"address": "0x401199", "description": "attacker-controlled value introduced via atoi()"},
+    {"address": "0x401154", "description": "division with unguarded divisor dword ptr [rbp - 8] (no zero-check)"}
+  ],
+  "evidence": "unguarded integer division (divisor dword ptr [rbp - 8]) in risky_ratio with no zero-check; attacker input via atoi() can drive the divisor to zero (SIGFPE)",
   "confidence": "medium"
 }
 ```
