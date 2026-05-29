@@ -27,11 +27,19 @@ import json
 from typing import Any
 
 from autopsy import __version__ as _AUTOPSY_VERSION
+from autopsy.baseline import fingerprint as _finding_fingerprint
 from autopsy.report import Report
 
 # Canonical CWE catalog lives in :mod:`autopsy.scope` (single source of truth
 # shared with ``--list-checks``); aliased here so local references are unchanged.
 from autopsy.scope import CWE_CATALOG as _CWE_META
+
+# partialFingerprints key under which autopsy's build-resilient finding
+# fingerprint is published. GitHub Code Scanning (and other SARIF consumers)
+# use partialFingerprints to track an alert across runs/commits and de-duplicate
+# it; the convention is ``<name>/v<version>``. Bumping the suffix would tell
+# consumers the fingerprint algorithm changed.
+_FINGERPRINT_KEY = "autopsy/finding/v1"
 
 # SARIF 2.1.0 schema URI (informational; not fetched at runtime).
 _SARIF_SCHEMA = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
@@ -143,6 +151,14 @@ def _result_for_finding(
         "level": level,
         "message": {"text": finding.evidence},
         "locations": [location],
+        # Build-resilient fingerprint so SARIF consumers can track this alert
+        # across runs/commits. autopsy locations are binary addresses that shift
+        # on every recompile, so without a stable partialFingerprint GitHub Code
+        # Scanning would churn alerts (close+reopen the same vuln) on each build.
+        # The fingerprint is the same CWE|function|evidence digest used by the
+        # --baseline feature, so SARIF tracking and baseline suppression key on
+        # the identical identity of a finding.
+        "partialFingerprints": {_FINGERPRINT_KEY: _finding_fingerprint(finding)},
         # SARIF property bag carries the raw triage confidence for consumers
         # that prefer the original three-level scheme over the SARIF level.
         "properties": {"confidence": confidence},
