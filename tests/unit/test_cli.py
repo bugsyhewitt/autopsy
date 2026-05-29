@@ -363,7 +363,7 @@ def test_list_checks_text_runs_without_binary(monkeypatch, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     # Every supported CWE id and its --checks token appears in the text output.
-    for cwe in (78, 119, 190, 338, 369, 377, 415, 416, 134, 676, 732, 787):
+    for cwe in (78, 119, 190, 338, 367, 369, 377, 415, 416, 134, 676, 732, 787):
         assert f"CWE-{cwe}" in out
         assert f"--checks {cwe}" in out
     assert "Buffer Overflow" in out
@@ -375,7 +375,7 @@ def test_list_checks_json_is_machine_readable(capsys):
     doc = json.loads(capsys.readouterr().out)
     checks = doc["checks"]
     cwes = {c["cwe"] for c in checks}
-    assert cwes == {78, 119, 190, 338, 369, 377, 415, 416, 134, 676, 732, 787}
+    assert cwes == {78, 119, 190, 338, 367, 369, 377, 415, 416, 134, 676, 732, 787}
     sample = next(c for c in checks if c["cwe"] == 119)
     assert sample["token"] == "119"
     assert sample["short"] == "Buffer Overflow"

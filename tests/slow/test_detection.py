@@ -281,6 +281,36 @@ def test_cwe732_detected(require_angr, fixtures_dir):
     assert "0o777" in " ".join(f["evidence"] for f in cwe732)
 
 
+def test_cwe367_detected(require_angr, fixtures_dir):
+    # TOCTOU race: access_then_open() checks with access() then open()s by name;
+    # stat_then_fopen() stat()s then fopen()s; lstat_then_unlink() lstat()s then
+    # unlink()s. The safe descriptor pattern (safe_open_then_fstat: open then
+    # fstat on the fd) and the single-sided functions (only_check / only_use)
+    # must NOT fire.
+    rep = _analyze(fixtures_dir, "cwe367-vuln", "367")
+    d = rep.to_dict()
+    assert d["error"] is None
+    cwe367 = [f for f in d["findings"] if f["cwe"] == 367]
+    assert cwe367, f"expected CWE-367 findings, got {d['findings']}"
+    for f in cwe367:
+        _assert_finding_contract(f, 367)
+        # Each TOCTOU finding records both the check and the use program points.
+        assert len(f["taint_trace"]) == 2
+    funcs = {f["function"] for f in cwe367}
+    assert "access_then_open" in funcs, f"access->open not flagged: {cwe367}"
+    assert "stat_then_fopen" in funcs, f"stat->fopen not flagged: {cwe367}"
+    assert "lstat_then_unlink" in funcs, f"lstat->unlink not flagged: {cwe367}"
+    # Zero false positives: the descriptor-based safe form and single-sided
+    # functions must never fire.
+    assert "safe_open_then_fstat" not in funcs, f"open->fstat(fd) must not fire: {cwe367}"
+    assert "only_check" not in funcs, f"a lone access() must not fire: {cwe367}"
+    assert "only_use" not in funcs, f"a lone open() must not fire: {cwe367}"
+    # The check->use sequence is a structural-but-not-certain race -> medium.
+    assert all(f["confidence"] == "medium" for f in cwe367)
+    joined = " ".join(f["evidence"] for f in cwe367)
+    assert "access" in joined and "open" in joined
+
+
 def test_cwe78_detected_on_aarch64(require_angr, fixtures_dir):
     # AArch64 (ARM64) support: the call-site-driven CWE-78 check must fire on a
     # `bl` (branch-with-link) call to system() fed by an fgets() source, exactly
@@ -333,6 +363,7 @@ def test_max_states_high_completes_all_fixtures(require_angr, fixtures_dir):
         ("cwe119-vuln", 119),
         ("cwe190-vuln", 190),
         ("cwe338-vuln", 338),
+        ("cwe367-vuln", 367),
         ("cwe369-vuln", 369),
         ("cwe377-vuln", 377),
         ("cwe415-vuln", 415),
