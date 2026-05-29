@@ -104,7 +104,7 @@ def to_sarif(report: Report) -> dict:
 
 ## Tier 2 — High value, moderate scope
 
-### 3. AArch64 (ARM64) architecture support — 🟡 PARTIAL (call-site checks + CWE-732 + CWE-190 + CWE-134)
+### 3. AArch64 (ARM64) architecture support — 🟡 PARTIAL (call-site checks + CWE-732 + CWE-190 + CWE-134 + CWE-415 + CWE-416 + CWE-369 + CWE-119 + CWE-787)
 
 **Status:** In progress. The v0.1 x86_64-only scope guard has been lifted —
 `assert_supported()` accepts `AARCH64`, `_resolve_call_target` parses the
@@ -143,9 +143,20 @@ through that base register (`str`/`ldr`/`strb`/`ldrb` over `[xD]`), and the
 bounds-check guard (`cmp`/`subs`/`tst`/`tbz`/`tbnz`/`cbz`/`cbnz` + `b.<cond>`) —
 alongside the x86_64 scaled-index-operand form, with a freestanding
 `tests/fixtures/cwe119-aarch64-vuln` fixture and unit + slow tests.
-**Still skipped on AArch64:** the remaining stack-slot/alias register-level
-checks (CWE-476/787), which rely on x86_64 `rbp`/`rsp`/`rdi`/`rax` spill
-conventions. Porting those is the remaining work for this item.
+**CWE-787 (heap OOB write via malloc + bulk-copy taint mismatch) is now
+arch-aware too** (Rotation 30): the allocator/source/copy call-site discovery
+was already arch-agnostic, and the literal-length suppression helper
+`AngrEngine.copy_call_length_is_literal` now reads the AAPCS64 length-argument
+register (`x2`/`w2`) for `memcpy`/`memmove`/`memset`/`strncpy`/`strncat`/
+`bcopy`, recognizing both the immediate form (`mov w2, #imm` and the
+`mov w2, wzr` zero-register encoding) and the stack-slot reload form
+(`ldr w2, [sp, #N]`/`ldursw`). A freestanding `tests/fixtures/cwe787-aarch64-vuln`
+fixture exercises both the vulnerable `copy_to_heap()` (memcpy with a
+stack-reloaded length — fires) and the safe `safe_copy()` (strncpy with a
+63-byte immediate length — must not fire). **Still skipped on AArch64:** the
+last stack-slot/alias register-level check (CWE-476 NULL-deref), which relies
+on x86_64 `rbp`/`rsp`/`rdi`/`rax` spill conventions. Porting it is the
+remaining work for this item.
 
 **What it is:** Lift the v0.1 x86_64-only scope guard to also accept
 `aarch64`/`arm64` ELF binaries.
@@ -168,10 +179,10 @@ conventions. Porting those is the remaining work for this item.
   register and so needed arch-aware mnemonic/register recognition for AArch64 —
   now shipped via `size_arith_before_call`. CWE-732 and CWE-190 are the two
   register-level checks made arch-aware so far.)
-- Remaining Phase 2 scope: port the last stack-slot/alias register-level checks
-  (CWE-476/787) to AArch64; the call-site checks and the arch-aware register-level
-  checks (CWE-732, CWE-190, CWE-134, CWE-369, CWE-415, CWE-416, CWE-119) already
-  run there.
+- Remaining Phase 2 scope: port the last stack-slot/alias register-level check
+  (CWE-476 NULL-deref) to AArch64; the call-site checks and the arch-aware
+  register-level checks (CWE-732, CWE-190, CWE-134, CWE-369, CWE-415, CWE-416,
+  CWE-119, CWE-787) already run there.
 
 **Feasibility caveat:** Building AArch64 fixtures requires an AArch64 cross-compiler
 (`aarch64-linux-gnu-gcc`) or QEMU. Alfred's host is x86_64 — confirm toolchain

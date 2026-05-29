@@ -641,15 +641,61 @@ def test_aarch64_runs_cwe119_under_all(require_angr, fixtures_dir):
     )
 
 
+def test_cwe787_detected_on_aarch64(require_angr, fixtures_dir):
+    # AArch64 (ARM64) support for the arch-aware CWE-787 heap-OOB-write check:
+    # call-site discovery (allocator/source/copy enumeration) is already
+    # arch-agnostic, and the length-arg literal-suppression helper now reads
+    # the AAPCS64 length register (`x2`/`w2`) — `mov w2, #imm` is a literal,
+    # `ldr w2, [sp, #N]`/`ldursw` is a stack reload (possibly tainted). The
+    # vulnerable copy_to_heap() (memcpy with tainted length) fires; the safe
+    # safe_copy() (strncpy with a 63-byte literal length) must NOT fire.
+    rep = _analyze(fixtures_dir, "cwe787-aarch64-vuln", "787")
+    d = rep.to_dict()
+    assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
+    cwe787 = [f for f in d["findings"] if f["cwe"] == 787]
+    assert cwe787, f"expected a CWE-787 finding on aarch64, got {d['findings']}"
+    for f in cwe787:
+        _assert_finding_contract(f, 787)
+    funcs = {f["function"] for f in cwe787}
+    # The tainted-length memcpy in copy_to_heap() fires.
+    assert "copy_to_heap" in funcs, (
+        f"tainted-length memcpy not flagged on aarch64: {cwe787}"
+    )
+    # The literal-length strncpy(p, line, 63) in safe_copy() must NOT fire —
+    # the literal-length suppression (now arch-aware on AArch64) catches it.
+    assert "safe_copy" not in funcs, (
+        f"literal-length strncpy in safe_copy must not fire on aarch64: {cwe787}"
+    )
+    # The co-location heuristic reports medium confidence (same as x86_64).
+    copy_finding = next(f for f in cwe787 if f["function"] == "copy_to_heap")
+    assert copy_finding["confidence"] == "medium"
+
+
+def test_aarch64_runs_cwe787_under_all(require_angr, fixtures_dir):
+    # Under "all" on AArch64, CWE-787 now runs (it is no longer in the skipped
+    # set) and its findings surface alongside the call-site-driven checks.
+    rep = _analyze(fixtures_dir, "cwe787-aarch64-vuln", "all")
+    d = rep.to_dict()
+    assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
+    assert 787 not in d["skipped_checks"], (
+        f"CWE-787 should run on AArch64, but was skipped: {d['skipped_checks']}"
+    )
+    assert any(f["cwe"] == 787 for f in d["findings"]), (
+        f"expected CWE-787 findings under 'all' on aarch64: {d['findings']}"
+    )
+
+
 def test_aarch64_skips_register_level_checks(require_angr, fixtures_dir):
-    # On AArch64, the remaining x86_64-only register-level checks (CWE-476/787)
-    # are skipped rather than producing unsound results; the arch-agnostic
-    # checks — including the arch-aware CWE-119/732/190/134/415/416/369 — still run.
+    # On AArch64, the remaining x86_64-only register-level check (CWE-476
+    # NULL-deref) is skipped rather than producing unsound results; the
+    # arch-agnostic checks — including the arch-aware CWE-119/732/190/134/415/
+    # 416/369/787 — still run.
     rep = _analyze(fixtures_dir, "cwe78-aarch64-vuln", "all")
     d = rep.to_dict()
     assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
-    assert set(d["skipped_checks"]) == {476, 787}
-    # CWE-119/732/190/134/415/416/369 are arch-aware and must NOT be skipped on AArch64.
+    assert set(d["skipped_checks"]) == {476}
+    # CWE-119/732/190/134/415/416/369/787 are arch-aware and must NOT be
+    # skipped on AArch64.
     assert 119 not in d["skipped_checks"]
     assert 732 not in d["skipped_checks"]
     assert 190 not in d["skipped_checks"]
@@ -657,6 +703,7 @@ def test_aarch64_skips_register_level_checks(require_angr, fixtures_dir):
     assert 415 not in d["skipped_checks"]
     assert 416 not in d["skipped_checks"]
     assert 369 not in d["skipped_checks"]
+    assert 787 not in d["skipped_checks"]
     # The CWE-78 finding still surfaces under "all".
     assert any(f["cwe"] == 78 for f in d["findings"])
 

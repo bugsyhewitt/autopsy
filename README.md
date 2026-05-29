@@ -172,7 +172,7 @@ never written from, nor applied to, a half-finished run.
 | Architecture | Checks that run |
 |---|---|
 | **x86_64 (AMD64)** | all checks (CWE-119, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787) |
-| **AArch64 (ARM64)** | the call-site-driven checks (**CWE-78**, **CWE-338**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**, **CWE-134**, **CWE-415**, **CWE-416**, **CWE-369**, **CWE-119**) |
+| **AArch64 (ARM64)** | the call-site-driven checks (**CWE-78**, **CWE-338**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**, **CWE-134**, **CWE-415**, **CWE-416**, **CWE-369**, **CWE-119**, **CWE-787**) |
 
 On an AArch64 target, the **CWE-732** permission check runs natively: its register
 reasoning only reads a single mode/mask *immediate* out of the AAPCS64 argument
@@ -221,21 +221,30 @@ conditional jump) and the AArch64 one (the index sign-extended with
 sum `add x9, x9, x10`, the dereference through that base register `strb w8, [x9]`;
 guard via `cmp`/`subs`/`tst`/`tbz`/`tbnz`/`cbz`/`cbnz` + `b.<cond>`), so it runs
 on AArch64 too (the `tests/fixtures/cwe119-aarch64-vuln` ARM64 fixture exercises
-it). The remaining register-level checks (CWE-476/787) rely on x86_64
-stack-slot/register conventions, so they are **skipped** rather than producing
-unsound results. Skipped checks are listed in the report's `skipped_checks`
-array and noted on stderr:
+it). The **CWE-787** heap out-of-bounds write check is arch-aware too: its
+allocator/source/copy call-site discovery is already arch-agnostic, and the
+literal-length suppression helper (`copy_call_length_is_literal`) now reads
+the AAPCS64 length-argument register (`x2`/`w2`) for `memcpy`/`memmove`/
+`memset`/`strncpy`/`strncat`/`bcopy` — a compile-time `mov w2, #imm` (or the
+`mov w2, wzr` zero-register form) is treated as a literal length (and the
+copy site is suppressed), while a stack-slot reload (`ldr w2, [sp, #N]` /
+`ldursw`) is treated as a possibly-tainted runtime length (the copy site
+fires), so it runs on AArch64 too (the `tests/fixtures/cwe787-aarch64-vuln`
+ARM64 fixture exercises both sides). The remaining register-level check
+(CWE-476 NULL-deref) relies on x86_64 stack-slot/register conventions, so it
+is **skipped** rather than producing unsound results. Skipped checks are
+listed in the report's `skipped_checks` array and noted on stderr:
 
 ```bash
 autopsy --binary ./arm64-target --checks all
-# stderr: note: skipped CWE-476, CWE-787 (not supported on this target's architecture)
+# stderr: note: skipped CWE-476 (not supported on this target's architecture)
 ```
 
 ```json
 {
   "checks": [119, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787],
-  "skipped_checks": [476, 787],
-  "findings": [ /* CWE-78 / 119 / 134 / 190 / 338 / 367 / 369 / 377 / 415 / 416 / 676 / 732 findings */ ]
+  "skipped_checks": [476],
+  "findings": [ /* CWE-78 / 119 / 134 / 190 / 338 / 367 / 369 / 377 / 415 / 416 / 676 / 732 / 787 findings */ ]
 }
 ```
 

@@ -27,6 +27,7 @@ run without a compiler. This file documents how to regenerate them if needed.
 | `cwe416-aarch64-vuln.c` + `cwe416-aarch64-stubs.c` / `cwe416-aarch64-vuln` | source + binary: **AArch64** intra-procedural use-after-free (exercises the arch-aware register-level CWE-416 check on ARM64: free then dereference of the same pointer in `use_after_free()`); the freed-but-not-reused pointer in `safe_free()` must not be flagged |
 | `cwe369-aarch64-vuln.c` + `cwe369-aarch64-stubs.c` / `cwe369-aarch64-vuln` | source + binary: **AArch64** divide-by-zero (exercises the arch-aware CWE-369 check on ARM64: unguarded `sdiv`/`udiv` in `risky_ratio()`); the zero-checked `safe_ratio()` must not be flagged |
 | `cwe119-aarch64-vuln.c` + `cwe119-aarch64-stubs.c` / `cwe119-aarch64-vuln` | source + binary: **AArch64** buffer over-read/write via attacker-controlled index (exercises the arch-aware register-level CWE-119 check on ARM64: unguarded register-indexed store in `store_at()`); the range-checked `safe_store()` must not be flagged |
+| `cwe787-aarch64-vuln.c` + `cwe787-aarch64-stubs.c` / `cwe787-aarch64-vuln` | source + binary: **AArch64** heap out-of-bounds write via malloc + bulk-copy taint mismatch (exercises the arch-aware CWE-787 check on ARM64: the tainted-length memcpy in `copy_to_heap()` fires); the literal-length `strncpy(p, line, 63)` in `safe_copy()` must not be flagged (the literal-length suppression catches it via the AAPCS64 `mov w2, #0x3f` form) |
 | `clean-baseline.c` / `clean-baseline` | source + binary: none of the four classes (zero-false-positive check) |
 | `Makefile` | build rules |
 
@@ -256,6 +257,34 @@ You should see `ldrsw x10, [sp, #0xc]` / `add x9, x9, x10` / `strb w8, [x9]` wit
 no preceding `cmp`/`subs`/`tbnz` in `<store_at>` (the unguarded indexed write),
 and a `tbnz`/`subs`+`b.lt` guard before the same `add`/`strb` sequence in
 `<safe_store>` (the bounds check that must stay unflagged), with
+`bl ... <fgets>` and `bl ... <atoi>` in `<main>`.
+
+`cwe787-aarch64-vuln` exercises the **arch-aware** CWE-787 heap out-of-bounds
+write check on AArch64. The detection model is the same as on x86_64 — a
+malloc + bulk-copy/fill co-located in one function, with a copy whose length
+argument is NOT a compile-time literal — but the literal-length suppression
+helper now reads the AAPCS64 length-argument register `x2`/`w2`. At `-O0`,
+`copy_to_heap()` materializes the tainted length with a stack-slot reload
+(`ldrsw x2, [sp, #0x8]`) before `bl <memcpy>` (must fire — non-literal),
+while `safe_copy()` materializes the constant 63 as `mov x2, #0x3f` (or
+`mov w2, #0x3f`) before `bl <strncpy>` (must NOT fire — literal length, the
+suppression catches it). The check pairs both functions with the
+attacker-input source (`fgets`/`atoi` in `main`). Same freestanding
+cross-build recipe (stub libc in `cwe787-aarch64-stubs.c`). Keep the
+allocation/copy length in `copy_to_heap()` coming from function parameters
+(so the length is reloaded from a stack slot and not folded to a constant),
+and keep the `63` in `safe_copy()` as a compile-time literal. Verify the
+codegen with:
+
+```bash
+llvm-objdump -d cwe787-aarch64-vuln | grep -A12 '<copy_to_heap>:'
+llvm-objdump -d cwe787-aarch64-vuln | grep -A14 '<safe_copy>:'
+```
+
+You should see `ldrsw x2, [sp, #N]` (or `ldr w2, [sp, #N]`) immediately before
+`bl ... <memcpy>` in `<copy_to_heap>` (the tainted runtime length), and
+`mov x2, #0x3f` (or `mov w2, #0x3f`) immediately before `bl ... <strncpy>` in
+`<safe_copy>` (the literal length that must stay unflagged), with
 `bl ... <fgets>` and `bl ... <atoi>` in `<main>`.
 
 Toolchain:
