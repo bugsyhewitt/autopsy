@@ -168,11 +168,13 @@ def test_cwe732_in_catalog():
     assert 732 in {c["cwe"] for c in list_checks()}
 
 
-def test_cwe732_is_register_level_not_arch_agnostic():
-    """CWE-732 reads x86_64 mode registers, so it is NOT arch-agnostic."""
+def test_cwe732_is_arch_aware_and_runs_on_aarch64():
+    """CWE-732 reads only an immediate mode/mask out of the per-arch argument
+    register, so its register reasoning is arch-aware and it is included in the
+    set of checks that run on AArch64 (alongside the call-site-driven checks)."""
     from autopsy.engine import AngrEngine
 
-    assert 732 not in AngrEngine._ARCH_AGNOSTIC_CHECKS
+    assert 732 in AngrEngine._ARCH_AGNOSTIC_CHECKS
 
 
 def test_resolve_checks_732():

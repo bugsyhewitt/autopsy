@@ -16,7 +16,8 @@ within a function and across a single call hop. It is slower and deeper by
 design.
 
 > **Scope:** ELF only. Full check coverage on x86_64; the call-site-driven
-> checks (CWE-78, CWE-190) also run on AArch64. See
+> checks (CWE-78/190/338/367/377/676) plus the arch-aware permission check
+> (CWE-732) also run on AArch64. See
 > [Architecture support](#architecture-support) and
 > [What autopsy is not](#what-autopsy-is-not).
 
@@ -171,23 +172,27 @@ never written from, nor applied to, a half-finished run.
 | Architecture | Checks that run |
 |---|---|
 | **x86_64 (AMD64)** | all checks (CWE-119, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787) |
-| **AArch64 (ARM64)** | the call-site-driven checks: **CWE-78**, **CWE-190**, **CWE-338**, **CWE-367**, **CWE-377** and **CWE-676** |
+| **AArch64 (ARM64)** | the call-site-driven checks (**CWE-78**, **CWE-190**, **CWE-338**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level permission check (**CWE-732**) |
 
-On an AArch64 target, the register-level checks (CWE-119/369/415/416/476/134/787)
-rely on x86_64 register conventions, so they are **skipped** rather than
-producing unsound results. Skipped checks are listed in the report's
-`skipped_checks` array and noted on stderr:
+On an AArch64 target, the **CWE-732** permission check runs natively: its register
+reasoning only reads a single mode/mask *immediate* out of the AAPCS64 argument
+register (`w1` for `chmod`, `w0` for `umask`, including the `mov w0, wzr`
+zero-register encoding of `umask(0)`), so it is arch-aware rather than
+x86_64-bound. The remaining register-level checks
+(CWE-119/369/415/416/476/134/787) rely on x86_64 stack-slot/register conventions,
+so they are **skipped** rather than producing unsound results. Skipped checks are
+listed in the report's `skipped_checks` array and noted on stderr:
 
 ```bash
 autopsy --binary ./arm64-target --checks all
-# stderr: note: skipped CWE-119, CWE-369, CWE-415, CWE-416, CWE-476, CWE-134, CWE-732, CWE-787 (not supported on this target's architecture)
+# stderr: note: skipped CWE-119, CWE-369, CWE-415, CWE-416, CWE-476, CWE-134, CWE-787 (not supported on this target's architecture)
 ```
 
 ```json
 {
   "checks": [119, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787],
   "skipped_checks": [119, 369, 415, 416, 476, 134, 787],
-  "findings": [ /* CWE-78 / CWE-190 / CWE-338 / CWE-367 / CWE-377 / CWE-676 findings */ ]
+  "findings": [ /* CWE-78 / 190 / 338 / 367 / 377 / 676 / 732 findings */ ]
 }
 ```
 
@@ -700,11 +705,13 @@ process subsequently creates) writable by users other than its owner, so a local
 attacker can tamper with a config file, a key, a log, or a setuid helper that
 should have been owner-only. This is the weakness CWE-732 names.
 
-The check reads the mode out of the call's argument register (x86_64 SysV:
-`rsi` for `chmod`/`fchmod`/`lchmod`, `rdx` for `fchmodat`, `rdi` for `umask`),
-walking back from the call to resolve the immediate. It flags `chmod`-family
-calls whose mode sets the group-write (`0o020`) or world-write (`0o002`) bit,
-and `umask` calls whose mask does not strip **both** of those bits.
+The check reads the mode out of the call's argument register, walking back from
+the call to resolve the immediate. The register mapping is per-architecture —
+x86_64 SysV (`rsi` for `chmod`/`fchmod`/`lchmod`, `rdx` for `fchmodat`, `rdi`
+for `umask`) and AArch64 AAPCS64 (`x1`/`w1` for `chmod`/`fchmod`/`lchmod`,
+`x2`/`w2` for `fchmodat`, `x0`/`w0` for `umask`). It flags `chmod`-family calls
+whose mode sets the group-write (`0o020`) or world-write (`0o002`) bit, and
+`umask` calls whose mask does not strip **both** of those bits.
 
 Zero-false-positive posture: a mode/mask **computed at runtime** (loaded from a
 register or stack slot) has an unknown value and is never flagged — only
@@ -718,8 +725,11 @@ the weakness itself.
 literal); `umask` findings carry `confidence: "medium"` (a process-wide policy
 whose impact depends on what files are later created).
 
-This is a **register-level** detector (it reads the x86_64 mode-argument
-register), so it runs on **x86_64 only** and is skipped on AArch64.
+This is an **arch-aware register-level** detector: because it reads only a single
+mode/mask immediate out of the (per-architecture) argument register, it runs on
+**both x86_64 and AArch64** — unlike the other register-level checks, it is *not*
+skipped on AArch64 (the `tests/fixtures/cwe732-aarch64-vuln` ARM64 fixture
+exercises this).
 
 ```bash
 autopsy --binary tests/fixtures/cwe732-vuln --checks 732 --format json
@@ -876,7 +886,8 @@ regeneration. See `tests/fixtures/REGENERATE.md`.
 
 - No PE binary support (ELF only).
 - No architectures beyond x86_64 and AArch64 (and AArch64 runs the
-  call-site-driven checks only — see [Architecture support](#architecture-support)).
+  call-site-driven checks plus the arch-aware CWE-732 permission check — see
+  [Architecture support](#architecture-support)).
 - No bare-metal / firmware targets.
 - No symbolic execution to PoC input generation.
 - No performance optimization pass.

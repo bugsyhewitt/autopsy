@@ -104,7 +104,23 @@ def to_sarif(report: Report) -> dict:
 
 ## Tier 2 — High value, moderate scope
 
-### 3. AArch64 (ARM64) architecture support
+### 3. AArch64 (ARM64) architecture support — 🟡 PARTIAL (call-site checks + CWE-732)
+
+**Status:** In progress. The v0.1 x86_64-only scope guard has been lifted —
+`assert_supported()` accepts `AARCH64`, `_resolve_call_target` parses the
+AArch64 `bl #0x…` operand form, and the call-graph traversal selects the `bl`
+direct-call mnemonic per-architecture. The call-site-driven checks
+(CWE-78/190/338/367/377/676) run unchanged on AArch64. **The first
+register-level check has now been made arch-aware: CWE-732** (incorrect
+permission assignment) reads its mode/mask immediate out of the AAPCS64 argument
+register (`x1`/`w1` for `chmod`, `x2`/`w2` for `fchmodat`, `x0`/`w0` for `umask`,
+including the `mov w0, wzr` zero-register encoding of `umask(0)`), so it runs on
+both architectures and is excluded from the AArch64 skip set. A freestanding
+AArch64 fixture (`tests/fixtures/cwe732-aarch64-vuln`) plus unit and slow tests
+lock the behavior. **Still skipped on AArch64:** the stack-slot/alias
+register-level checks (CWE-119/369/415/416/476/134/787), which rely on x86_64
+`rbp`/`rsp`/`rdi`/`rax` spill conventions. Porting those (the slot-tracking
+abstraction the caveat below describes) is the remaining work for this item.
 
 **What it is:** Lift the v0.1 x86_64-only scope guard to also accept
 `aarch64`/`arm64` ELF binaries.

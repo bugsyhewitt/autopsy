@@ -103,25 +103,38 @@ class AngrEngine:
     # note below).
     SUPPORTED_ARCHS: tuple[str, ...] = ("AMD64", "AARCH64")
 
-    # CWE checks whose detection is purely call-site-driven (call-graph + import
-    # symbol resolution) and therefore architecture-agnostic. These run on any
-    # architecture in ``SUPPORTED_ARCHS``. CWE-676 (dangerous-function use) and
-    # CWE-377 (insecure temporary file) are call-site-driven like CWE-78/190 —
-    # they resolve direct calls by symbol name and never inspect registers, so
-    # they are sound on AArch64 too. CWE-338 (weak-PRNG use) is the same shape —
-    # it resolves direct calls by symbol name and never inspects registers.
-    # CWE-367 (TOCTOU check->use) is likewise call-site-driven (it pairs a
-    # by-name check call with a following by-name use call) and never inspects
-    # registers, so it runs on AArch64 too.
-    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 190, 338, 367, 377, 676)
+    # CWE checks that run on every architecture in ``SUPPORTED_ARCHS``. Two
+    # kinds qualify:
+    #
+    # (a) Purely call-site-driven checks (call-graph + import symbol
+    #     resolution). CWE-78/190 resolve direct calls by symbol name; CWE-676
+    #     (dangerous-function use), CWE-377 (insecure temporary file), CWE-338
+    #     (weak-PRNG use) and CWE-367 (TOCTOU check->use) are the same shape —
+    #     they pair/flag calls by name and never inspect registers, so they are
+    #     sound on AArch64 unchanged.
+    #
+    # (b) Register-level checks whose register reasoning has been made
+    #     arch-aware. CWE-732 (incorrect permission assignment) reads a single
+    #     *immediate* mode/mask out of the call's argument register; the engine
+    #     helpers know both the SysV/x86_64 and the AArch64 PCS argument
+    #     registers and the per-arch immediate-move encoding, so the check is
+    #     sound on AArch64 too (see ``chmod_calls_with_permissive_mode`` /
+    #     ``umask_calls_with_permissive_mask``).
+    #
+    # The remaining register-level checks (CWE-119/415/416/476/134/787/369)
+    # still rely on x86_64 stack-slot/alias conventions and are skipped on
+    # AArch64.
+    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 190, 338, 367, 377, 676, 732)
 
     def assert_supported(self) -> None:
         """Reject targets on architectures autopsy cannot analyze.
 
         x86_64 (AMD64) is fully supported. AArch64 (ARM64) is supported for the
-        call-site-driven checks (CWE-78, CWE-190); the register-level checks
-        (CWE-119/415/416/732/787) use x86_64 register conventions and report no
-        findings on AArch64 — see :meth:`checks_supported_on_arch`.
+        arch-agnostic checks — the call-site-driven ones (CWE-78/190/338/367/
+        377/676) and the arch-aware CWE-732 permission check; the remaining
+        register-level checks (CWE-119/415/416/476/134/787/369) use x86_64
+        register conventions and report no findings on AArch64 — see
+        :meth:`checks_supported_on_arch`.
         """
         arch_name = self.project.arch.name
         if arch_name not in self.SUPPORTED_ARCHS:
@@ -134,10 +147,12 @@ class AngrEngine:
     def checks_supported_on_arch(self, cwes: list[int]) -> tuple[list[int], list[int]]:
         """Partition requested checks into (runnable, skipped) for this arch.
 
-        On x86_64 every check runs. On AArch64 only the architecture-agnostic,
-        call-site-driven checks (CWE-78, CWE-190) run; the register-level checks
-        rely on x86_64 register-name literals and would silently mis-analyze
-        AArch64, so they are skipped rather than producing unsound results.
+        On x86_64 every check runs. On AArch64 only the architecture-agnostic
+        checks in ``_ARCH_AGNOSTIC_CHECKS`` run — the call-site-driven ones plus
+        the arch-aware CWE-732 permission check. The remaining register-level
+        checks rely on x86_64 stack-slot/register conventions and would silently
+        mis-analyze AArch64, so they are skipped rather than producing unsound
+        results.
 
         Args:
             cwes: The CWE ids the caller intends to run.
@@ -795,6 +810,20 @@ class AngrEngine:
         "fchmodat": "rdx",    # fchmodat(dirfd, path, mode, flags)
     }
 
+    # The same mapping for AArch64. The AAPCS64 procedure call standard passes
+    # integer arguments in x0..x7 (32-bit views w0..w7): chmod's mode is the
+    # second argument (x1/w1), fchmodat's mode the third (x2/w2). A mode literal
+    # is a small octal value that -O0 codegen materializes with a 32-bit move
+    # into the w-view, so the mode arrives in w1 / w2 (which zero-extends into
+    # x1 / x2). The 64-bit x-name is recorded so register-copy aliasing through
+    # either view is followed.
+    _CHMOD_SINK_MODE_REG_AARCH64: dict[str, str] = {
+        "chmod": "x1",        # chmod(path, mode)
+        "fchmod": "x1",       # fchmod(fd, mode)
+        "lchmod": "x1",       # lchmod(path, mode)
+        "fchmodat": "x2",     # fchmodat(dirfd, path, mode, flags)
+    }
+
     # The world-write (0o002) and group-write (0o020) permission bits. A mode
     # that sets either grants write access beyond the owner — the CWE-732
     # "incorrect permission assignment for a critical resource" signal.
@@ -823,27 +852,18 @@ class AngrEngine:
         Returns one dict per permissive-mode call:
         ``{"address": int, "function": str, "sink_name": str, "mode": int}``.
 
-        x86_64 only: the mode-argument register mapping uses the SysV calling
-        convention and the immediate/aliasing tracking assumes -O0 codegen.
-        Returns an empty list on non-AMD64 targets.
+        x86_64 (AMD64) and AArch64 (ARM64): the mode-argument register mapping is
+        per-architecture (SysV ``rsi``/``rdx`` on x86_64; AAPCS64 ``x1``/``x2``
+        on AArch64) and the immediate/aliasing tracking handles both the x86_64
+        ``mov esi, 0x1ff`` form and the AArch64 ``mov w1, #0x1ff`` form. Returns
+        an empty list on any other architecture.
         """
-        import re
-
-        if self.project.arch.name != "AMD64":
+        mode_reg_for_sink = self._chmod_mode_reg_map()
+        if mode_reg_for_sink is None:
             return []
 
         cfg = self.cfg()
         call_mnemonics = self._call_mnemonics()
-
-        # reg <- immediate: a compile-time constant mode. -O0 materializes a
-        # small octal literal with a 32-bit move (`mov esi, 0x1ff` for 0o777).
-        mov_imm = re.compile(r"^(r[a-z0-9]+|e[a-z0-9]+),\s*((?:0x[0-9a-f]+)|\d+)$")
-        # reg <- reg: a register copy (alias propagation).
-        reg_copy = re.compile(r"^(r[a-z0-9]+|e[a-z0-9]+),\s*(r[a-z0-9]+|e[a-z0-9]+)$")
-        # reg <- [rbp/rsp +/- N]: a stack-slot reload (runtime-computed mode).
-        load_slot = re.compile(
-            r"^(r[a-z0-9]+|e[a-z0-9]+),\s*(?:[a-z]+ ptr )?\[(rbp|rsp)\s*[+\-]"
-        )
 
         results: list[dict[str, Any]] = []
         for func in cfg.kb.functions.values():
@@ -861,32 +881,11 @@ class AngrEngine:
                 if insn.mnemonic not in call_mnemonics:
                     continue
                 target = self._resolve_call_target(insn, cfg)
-                mode_reg = self._CHMOD_SINK_MODE_REG.get(target)
+                mode_reg = mode_reg_for_sink.get(target)
                 if mode_reg is None:
                     continue
 
-                # The 32-bit sub-register (esi/edx) zero-extends into the 64-bit
-                # mode register; -O0 sets a small octal literal via that form.
-                mode_aliases = {mode_reg, "e" + mode_reg[1:]}
-                mode_val: int | None = None
-                for prev in reversed(insns[max(0, idx - 12): idx]):
-                    if prev.mnemonic != "mov":
-                        # Non-mov touching the mode reg would mean a computed
-                        # value we can't resolve; stay conservative and stop.
-                        continue
-                    mi = mov_imm.match(prev.op_str)
-                    if mi and self._reg_in(mi.group(1), mode_aliases):
-                        mode_val = int(mi.group(2), 0)
-                        break
-                    ms = load_slot.match(prev.op_str)
-                    if ms and self._reg_in(ms.group(1), mode_aliases):
-                        # mode reloaded from a stack slot -> runtime value, unknown.
-                        break
-                    mc = reg_copy.match(prev.op_str)
-                    if mc and self._reg_in(mc.group(1), mode_aliases):
-                        mode_aliases = mode_aliases | {mc.group(2), self._widen(mc.group(2))}
-                        continue
-
+                mode_val = self._resolve_arg_immediate(insns, idx, mode_reg)
                 if mode_val is None:
                     continue
                 if mode_val & (self._WORLD_WRITE | self._GROUP_WRITE):
@@ -899,6 +898,109 @@ class AngrEngine:
                         }
                     )
         return results
+
+    def _chmod_mode_reg_map(self) -> dict[str, str] | None:
+        """Per-arch chmod-family mode-register map, or ``None`` if unsupported."""
+        arch = self.project.arch.name
+        if arch == "AMD64":
+            return self._CHMOD_SINK_MODE_REG
+        if arch == "AARCH64":
+            return self._CHMOD_SINK_MODE_REG_AARCH64
+        return None
+
+    def _resolve_arg_immediate(
+        self, insns: list[Any], call_idx: int, arg_reg: str
+    ) -> int | None:
+        """Resolve a call argument register to a compile-time immediate value.
+
+        Walks back from the call at ``insns[call_idx]`` to determine how
+        ``arg_reg`` was last set, following register-copy aliases. Returns the
+        integer value if it was set from an immediate move, or ``None`` if the
+        value was loaded from memory (runtime-computed) or could not be resolved
+        — the conservative outcome that preserves the zero-false-positive
+        posture.
+
+        Architecture-aware. On x86_64 the immediate form is ``mov esi, 0x1ff``
+        and a runtime value reloads a stack slot (``mov esi, [rbp - N]``). On
+        AArch64 the immediate form is ``mov w1, #0x1ff`` (and ``mov w0, wzr`` —
+        the zero register — encodes a literal ``0``, e.g. ``umask(0)``), while a
+        runtime value loads from memory (``ldr w1, [sp, #N]`` / ``ldur``).
+        """
+        import re
+
+        if self.project.arch.name == "AARCH64":
+            # AArch64 (AAPCS64). Mode literals are materialized into the 32-bit
+            # w-view (which zero-extends into the x register); track both views.
+            base = arg_reg[1:]  # "x1" -> "1"
+            aliases = {f"x{base}", f"w{base}"}
+            # reg <- #imm: `mov w1, #0x1ff` / `mov w1, #511`.
+            mov_imm = re.compile(r"^([wx][0-9a-z]+),\s*#((?:0x[0-9a-f]+)|\d+)$")
+            # reg <- wzr/xzr: the zero register encodes a literal 0 (umask(0)).
+            mov_zr = re.compile(r"^([wx][0-9a-z]+),\s*([wx]zr)$")
+            # reg <- reg: a register copy (alias propagation).
+            reg_copy = re.compile(r"^([wx][0-9a-z]+),\s*([wx][0-9a-z]+)$")
+            # reg <- [mem]: a load from a stack slot/memory (runtime value).
+            load_mem = re.compile(r"^([wx][0-9a-z]+),\s*\[")
+            mov_like = {"mov", "movz", "ldr", "ldur"}
+            for prev in reversed(insns[max(0, call_idx - 12): call_idx]):
+                if prev.mnemonic not in mov_like:
+                    continue
+                mi = mov_imm.match(prev.op_str)
+                if mi and self._aarch64_reg_in(mi.group(1), aliases):
+                    return int(mi.group(2), 0)
+                mz = mov_zr.match(prev.op_str)
+                if mz and self._aarch64_reg_in(mz.group(1), aliases):
+                    return 0
+                ml = load_mem.match(prev.op_str)
+                if ml and self._aarch64_reg_in(ml.group(1), aliases):
+                    # mode reloaded from memory -> runtime value, unknown.
+                    return None
+                mc = reg_copy.match(prev.op_str)
+                if mc and self._aarch64_reg_in(mc.group(1), aliases):
+                    src = mc.group(2)
+                    aliases = aliases | {src, "x" + src[1:], "w" + src[1:]}
+                    continue
+            return None
+
+        # x86_64 (SysV). The 32-bit sub-register (esi/edx/edi) zero-extends into
+        # the 64-bit arg register; -O0 sets a small octal literal via that form.
+        aliases = {arg_reg, "e" + arg_reg[1:]}
+        mov_imm = re.compile(r"^(r[a-z0-9]+|e[a-z0-9]+),\s*((?:0x[0-9a-f]+)|\d+)$")
+        reg_copy = re.compile(r"^(r[a-z0-9]+|e[a-z0-9]+),\s*(r[a-z0-9]+|e[a-z0-9]+)$")
+        load_slot = re.compile(
+            r"^(r[a-z0-9]+|e[a-z0-9]+),\s*(?:[a-z]+ ptr )?\[(rbp|rsp)\s*[+\-]"
+        )
+        for prev in reversed(insns[max(0, call_idx - 12): call_idx]):
+            if prev.mnemonic != "mov":
+                # Non-mov touching the arg reg would mean a computed value we
+                # can't resolve; stay conservative and stop scanning it.
+                continue
+            mi = mov_imm.match(prev.op_str)
+            if mi and self._reg_in(mi.group(1), aliases):
+                return int(mi.group(2), 0)
+            ms = load_slot.match(prev.op_str)
+            if ms and self._reg_in(ms.group(1), aliases):
+                # arg reloaded from a stack slot -> runtime value, unknown.
+                return None
+            mc = reg_copy.match(prev.op_str)
+            if mc and self._reg_in(mc.group(1), aliases):
+                aliases = aliases | {mc.group(2), self._widen(mc.group(2))}
+                continue
+        return None
+
+    @staticmethod
+    def _aarch64_reg_in(reg: str, aliases: set[str]) -> bool:
+        """True if an AArch64 register (either w/x view) is in the alias set.
+
+        Treats the 32-bit ``wN`` and 64-bit ``xN`` views as the same register —
+        ``mov w1, #0x1ff`` sets the same logical argument as ``x1``.
+        """
+        if reg in aliases:
+            return True
+        if len(reg) >= 2 and reg[0] in ("w", "x"):
+            num = reg[1:]
+            return f"x{num}" in aliases or f"w{num}" in aliases
+        return False
 
     def umask_calls_with_permissive_mask(self) -> list[dict[str, Any]]:
         """Find ``umask`` calls whose immediate mask fails to mask group/other write.
@@ -919,21 +1021,23 @@ class AngrEngine:
         Returns one dict per permissive-mask call:
         ``{"address": int, "function": str, "sink_name": "umask", "mode": int}``.
 
-        x86_64 only.
+        x86_64 (AMD64) and AArch64 (ARM64): the mask argument is the first
+        parameter (SysV ``rdi`` / AAPCS64 ``x0``) and the immediate is resolved
+        per-architecture — including the AArch64 ``mov w0, wzr`` zero-register
+        form that encodes ``umask(0)``. Returns an empty list on any other
+        architecture.
         """
-        import re
-
-        if self.project.arch.name != "AMD64":
+        # First-argument register holding the mask: SysV rdi / AAPCS64 x0.
+        arch = self.project.arch.name
+        if arch == "AMD64":
+            mask_reg = "rdi"
+        elif arch == "AARCH64":
+            mask_reg = "x0"
+        else:
             return []
 
         cfg = self.cfg()
         call_mnemonics = self._call_mnemonics()
-
-        mov_imm = re.compile(r"^(r[a-z0-9]+|e[a-z0-9]+),\s*((?:0x[0-9a-f]+)|\d+)$")
-        reg_copy = re.compile(r"^(r[a-z0-9]+|e[a-z0-9]+),\s*(r[a-z0-9]+|e[a-z0-9]+)$")
-        load_slot = re.compile(
-            r"^(r[a-z0-9]+|e[a-z0-9]+),\s*(?:[a-z]+ ptr )?\[(rbp|rsp)\s*[+\-]"
-        )
 
         results: list[dict[str, Any]] = []
         strip_bits = self._WORLD_WRITE | self._GROUP_WRITE  # 0o022
@@ -953,23 +1057,7 @@ class AngrEngine:
                     continue
                 if self._resolve_call_target(insn, cfg) != "umask":
                     continue
-                mask_aliases = {"rdi", "edi"}
-                mask_val: int | None = None
-                for prev in reversed(insns[max(0, idx - 12): idx]):
-                    if prev.mnemonic != "mov":
-                        continue
-                    mi = mov_imm.match(prev.op_str)
-                    if mi and self._reg_in(mi.group(1), mask_aliases):
-                        mask_val = int(mi.group(2), 0)
-                        break
-                    ms = load_slot.match(prev.op_str)
-                    if ms and self._reg_in(ms.group(1), mask_aliases):
-                        break
-                    mc = reg_copy.match(prev.op_str)
-                    if mc and self._reg_in(mc.group(1), mask_aliases):
-                        mask_aliases = mask_aliases | {mc.group(2), self._widen(mc.group(2))}
-                        continue
-
+                mask_val = self._resolve_arg_immediate(insns, idx, mask_reg)
                 if mask_val is None:
                     continue
                 # Dangerous when the mask does not strip BOTH group- and

@@ -19,7 +19,8 @@ run without a compiler. This file documents how to regenerate them if needed.
 | `cwe732-vuln.c` / `cwe732-vuln` | source + binary: incorrect permission assignment (`chmod(path,0777)`/`chmod(path,0666)`/`umask(0)`); the restrictive `chmod(path,0600)` in `lock_down()` and `umask(0077)` in `tight_umask()` must not be flagged |
 | `cwe367-vuln.c` / `cwe367-vuln` | source + binary: TOCTOU race (`access`→`open`, `stat`→`fopen`, `lstat`→`unlink`); the descriptor-based `safe_open_then_fstat()` and the single-sided `only_check()`/`only_use()` must not be flagged |
 | `cwe476-vuln.c` / `cwe476-vuln` | source + binary: NULL pointer dereference (`malloc()` result dereferenced with no NULL-check in `risky_fill()`); the NULL-checked `safe_fill()` and `safe_env()` must not be flagged |
-| `cwe78-aarch64-vuln.c` + `cwe78-aarch64-stubs.c` / `cwe78-aarch64-vuln` | source + binary: **AArch64** OS command injection (exercises ARM64 support) |
+| `cwe78-aarch64-vuln.c` + `cwe78-aarch64-stubs.c` / `cwe78-aarch64-vuln` | source + binary: **AArch64** OS command injection (exercises ARM64 call-site support) |
+| `cwe732-aarch64-vuln.c` + `cwe732-aarch64-stubs.c` / `cwe732-aarch64-vuln` | source + binary: **AArch64** incorrect permission assignment (exercises the arch-aware register-level CWE-732 check on ARM64) |
 | `clean-baseline.c` / `clean-baseline` | source + binary: none of the four classes (zero-false-positive check) |
 | `Makefile` | build rules |
 
@@ -92,12 +93,30 @@ pytest -m slow
   `cmp`/`test` + conditional branch; the detector recognizes that guard and is
   silent on the safe companions.
 
-## AArch64 (ARM64) fixture
+## AArch64 (ARM64) fixtures
 
 `cwe78-aarch64-vuln` exercises autopsy's AArch64 support — the call-site-driven
 CWE-78 check firing on a `bl` (branch-with-link) call to `system()`. Because the
 host is x86_64 (no AArch64 libc/sysroot), it is built **freestanding** and linked
 statically with stub libc/runtime symbols (`cwe78-aarch64-stubs.c`).
+
+`cwe732-aarch64-vuln` exercises the **arch-aware register-level** CWE-732
+permission check on AArch64: the chmod/umask mode immediate is read out of the
+AAPCS64 argument register (`w1` for chmod, `w0` for umask, including the
+`mov w0, wzr` zero-register encoding of `umask(0)`) materialized just before each
+`bl` call. It uses the same freestanding cross-build recipe (stub libc in
+`cwe732-aarch64-stubs.c`). Keep the mode/mask values as compile-time octal
+literals — a value computed at runtime (loaded from memory) is intentionally not
+flagged, preserving the zero-false-positive posture. Verify the codegen with:
+
+```bash
+llvm-objdump -d cwe732-aarch64-vuln | grep -B1 -A1 -iE 'mov\s+w[012]'
+```
+
+You should see `mov w1, #0x1ff` (0o777) and `mov w1, #0x1b6` (0o666) before
+their `bl <chmod>` calls and `mov w0, wzr` (umask(0)) before its `bl <umask>`,
+with the restrictive `mov w1, #0x180` (0o600) and `mov w0, #0x3f` (0o077) that
+must stay unflagged.
 
 Toolchain:
 

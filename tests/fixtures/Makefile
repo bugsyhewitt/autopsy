@@ -36,7 +36,7 @@ all: $(BINS) aarch64
 %: %.c
 	$(CC) $(ARCH) $(CFLAGS) -o $@ $<
 
-aarch64: cwe78-aarch64-vuln
+aarch64: cwe78-aarch64-vuln cwe732-aarch64-vuln
 
 cwe78-aarch64-vuln: cwe78-aarch64-vuln.c cwe78-aarch64-stubs.c
 	$(AARCH64_CC) $(AARCH64_TARGET) $(AARCH64_CFLAGS) -c cwe78-aarch64-vuln.c -o cwe78-aarch64-vuln.o
@@ -44,5 +44,15 @@ cwe78-aarch64-vuln: cwe78-aarch64-vuln.c cwe78-aarch64-stubs.c
 	$(AARCH64_LD) -o $@ cwe78-aarch64-vuln.o cwe78-aarch64-stubs.o -e _start --no-dynamic-linker
 	rm -f cwe78-aarch64-vuln.o cwe78-aarch64-stubs.o
 
+# AArch64 CWE-732 fixture: exercises the arch-aware register-level permission
+# check. The chmod/umask mode immediate is read from the AAPCS64 argument
+# register (x1/w1 / x0/w0). Same freestanding cross-build recipe as CWE-78.
+cwe732-aarch64-vuln: cwe732-aarch64-vuln.c cwe732-aarch64-stubs.c
+	$(AARCH64_CC) $(AARCH64_TARGET) $(AARCH64_CFLAGS) -c cwe732-aarch64-vuln.c -o cwe732-aarch64-vuln.o
+	$(AARCH64_CC) $(AARCH64_TARGET) $(AARCH64_CFLAGS) -c cwe732-aarch64-stubs.c -o cwe732-aarch64-stubs.o
+	$(AARCH64_LD) -o $@ cwe732-aarch64-vuln.o cwe732-aarch64-stubs.o -e _start --no-dynamic-linker
+	rm -f cwe732-aarch64-vuln.o cwe732-aarch64-stubs.o
+
 clean:
-	rm -f $(BINS) cwe78-aarch64-vuln cwe78-aarch64-vuln.o cwe78-aarch64-stubs.o
+	rm -f $(BINS) cwe78-aarch64-vuln cwe78-aarch64-vuln.o cwe78-aarch64-stubs.o \
+		cwe732-aarch64-vuln cwe732-aarch64-vuln.o cwe732-aarch64-stubs.o
