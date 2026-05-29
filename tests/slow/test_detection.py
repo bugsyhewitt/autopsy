@@ -481,18 +481,57 @@ def test_aarch64_runs_cwe134_under_all(require_angr, fixtures_dir):
     )
 
 
+def test_cwe415_detected_on_aarch64(require_angr, fixtures_dir):
+    # AArch64 (ARM64) support for the arch-aware intra-procedural CWE-415 check:
+    # the allocator return register (`x0`) is spilled to a stack slot
+    # (`str x0, [sp, #N]`) and reloaded (`ldr x0, [sp, #N]`) before two
+    # successive `bl <free>` calls with no intervening call — the double-free.
+    # The same vulnerable/safe split as the x86_64 fixture must hold.
+    rep = _analyze(fixtures_dir, "cwe415-aarch64-vuln", "415")
+    d = rep.to_dict()
+    assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
+    cwe415 = [f for f in d["findings"] if f["cwe"] == 415]
+    assert cwe415, f"expected a CWE-415 finding on aarch64, got {d['findings']}"
+    for f in cwe415:
+        _assert_finding_contract(f, 415)
+    funcs = {f["function"] for f in cwe415}
+    # The double-free in double_free() fires; the single free in safe_free() does not.
+    assert "double_free" in funcs, f"double-free not flagged on aarch64: {cwe415}"
+    assert "safe_free" not in funcs, (
+        f"the single free in safe_free must not be flagged on aarch64: {cwe415}"
+    )
+    # Intra-procedural double-free is a definitive pattern -> high confidence.
+    assert all(f["confidence"] == "high" for f in cwe415 if f["function"] == "double_free")
+
+
+def test_aarch64_runs_cwe415_under_all(require_angr, fixtures_dir):
+    # Under "all" on AArch64, CWE-415 now runs (it is no longer in the skipped
+    # set) and its findings surface alongside the call-site-driven checks.
+    rep = _analyze(fixtures_dir, "cwe415-aarch64-vuln", "all")
+    d = rep.to_dict()
+    assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
+    # CWE-415 must NOT appear in the skipped set on AArch64 anymore.
+    assert 415 not in d["skipped_checks"], (
+        f"CWE-415 should run on AArch64, but was skipped: {d['skipped_checks']}"
+    )
+    assert any(f["cwe"] == 415 for f in d["findings"]), (
+        f"expected CWE-415 findings under 'all' on aarch64: {d['findings']}"
+    )
+
+
 def test_aarch64_skips_register_level_checks(require_angr, fixtures_dir):
-    # On AArch64, the x86_64-only register-level checks (CWE-119/369/415/416/
-    # 476/787) are skipped rather than producing unsound results; the
-    # arch-agnostic checks — including the arch-aware CWE-732/190/134 — still run.
+    # On AArch64, the x86_64-only register-level checks (CWE-119/369/416/476/787)
+    # are skipped rather than producing unsound results; the arch-agnostic
+    # checks — including the arch-aware CWE-732/190/134/415 — still run.
     rep = _analyze(fixtures_dir, "cwe78-aarch64-vuln", "all")
     d = rep.to_dict()
     assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
-    assert set(d["skipped_checks"]) == {119, 369, 415, 416, 476, 787}
-    # CWE-732/190/134 are arch-aware and must NOT be skipped on AArch64.
+    assert set(d["skipped_checks"]) == {119, 369, 416, 476, 787}
+    # CWE-732/190/134/415 are arch-aware and must NOT be skipped on AArch64.
     assert 732 not in d["skipped_checks"]
     assert 190 not in d["skipped_checks"]
     assert 134 not in d["skipped_checks"]
+    assert 415 not in d["skipped_checks"]
     # The CWE-78 finding still surfaces under "all".
     assert any(f["cwe"] == 78 for f in d["findings"])
 

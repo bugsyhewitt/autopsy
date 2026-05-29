@@ -23,6 +23,7 @@ run without a compiler. This file documents how to regenerate them if needed.
 | `cwe732-aarch64-vuln.c` + `cwe732-aarch64-stubs.c` / `cwe732-aarch64-vuln` | source + binary: **AArch64** incorrect permission assignment (exercises the arch-aware register-level CWE-732 check on ARM64) |
 | `cwe190-aarch64-vuln.c` + `cwe190-aarch64-stubs.c` / `cwe190-aarch64-vuln` | source + binary: **AArch64** integer overflow into allocator size (exercises the arch-aware register-level CWE-190 check on ARM64) |
 | `cwe134-aarch64-vuln.c` + `cwe134-aarch64-stubs.c` / `cwe134-aarch64-vuln` | source + binary: **AArch64** uncontrolled format string (exercises the arch-aware register-level CWE-134 check on ARM64) |
+| `cwe415-aarch64-vuln.c` + `cwe415-aarch64-stubs.c` / `cwe415-aarch64-vuln` | source + binary: **AArch64** intra-procedural double-free (exercises the arch-aware register-level CWE-415 check on ARM64); the single free in `safe_free()` must not be flagged |
 | `clean-baseline.c` / `clean-baseline` | source + binary: none of the four classes (zero-false-positive check) |
 | `Makefile` | build rules |
 
@@ -156,6 +157,27 @@ You should see `ldr x0, [sp, #0x8]` then `bl ... <printf>` in `<emit>` (the
 vulnerable non-literal format), and `adr x0, ...` (or `adrp x0`) then
 `bl ... <printf>` in `<log_line>` (the safe rodata literal that must stay
 unflagged).
+
+`cwe415-aarch64-vuln` exercises the **arch-aware register-level** CWE-415
+intra-procedural double-free check on AArch64: the allocator return register
+(`x0`) is spilled to a stack slot (`str x0, [sp, #N]`) and reloaded
+(`ldr x0, [sp, #N]`) before each `bl <free>` call. Two successive `bl <free>`
+calls whose `x0` aliases the same slot, with NO function call between them, are
+the double-free the check flags (high confidence, mirroring the x86_64
+`mov [rbp-N], rax` / `mov rdi, [rbp-N]` / `call free` form). The safe companion
+`safe_free()` frees the pointer once and must NOT fire. Same freestanding
+cross-build recipe (stub libc in `cwe415-aarch64-stubs.c`). Keep the two frees
+in `double_free()` adjacent with no intervening call so the pattern stays
+intra-procedural. Verify the codegen with:
+
+```bash
+llvm-objdump -d cwe415-aarch64-vuln | grep -A14 '<double_free>:'
+llvm-objdump -d cwe415-aarch64-vuln | grep -A12 '<safe_free>:'
+```
+
+You should see `str x0, [sp, #0x8]` then two `ldr x0, [sp, #0x8]` / `bl <free>`
+pairs in `<double_free>` (the double-free), and a single `ldr x0, [sp, #0x8]` /
+`bl <free>` in `<safe_free>` (the safe single free that must stay unflagged).
 
 Toolchain:
 

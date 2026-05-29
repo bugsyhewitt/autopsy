@@ -60,10 +60,11 @@ def test_amd64_runs_every_check():
 def test_aarch64_runs_only_arch_agnostic_checks():
     eng = _engine_for_arch("AARCH64")
     runnable, skipped = eng.checks_supported_on_arch([119, 190, 415, 416, 78, 787])
-    # Only the arch-agnostic checks run on AArch64.
-    assert runnable == [190, 78]
-    # The x86_64-only register-level checks are recorded as skipped, not dropped.
-    assert skipped == [119, 415, 416, 787]
+    # Only the arch-agnostic checks run on AArch64. CWE-415 is now arch-aware
+    # (its intra-procedural double-free scanner knows the AArch64 forms).
+    assert runnable == [190, 415, 78]
+    # The remaining x86_64-only register-level checks are recorded as skipped.
+    assert skipped == [119, 416, 787]
 
 
 def test_aarch64_runs_cwe732_permission_check():
