@@ -104,23 +104,32 @@ def to_sarif(report: Report) -> dict:
 
 ## Tier 2 — High value, moderate scope
 
-### 3. AArch64 (ARM64) architecture support — 🟡 PARTIAL (call-site checks + CWE-732)
+### 3. AArch64 (ARM64) architecture support — 🟡 PARTIAL (call-site checks + CWE-732 + CWE-190)
 
 **Status:** In progress. The v0.1 x86_64-only scope guard has been lifted —
 `assert_supported()` accepts `AARCH64`, `_resolve_call_target` parses the
 AArch64 `bl #0x…` operand form, and the call-graph traversal selects the `bl`
 direct-call mnemonic per-architecture. The call-site-driven checks
-(CWE-78/190/338/367/377/676) run unchanged on AArch64. **The first
-register-level check has now been made arch-aware: CWE-732** (incorrect
+(CWE-78/338/367/377/676) run unchanged on AArch64. **Two register-level checks
+have now been made arch-aware: CWE-732 and CWE-190.** CWE-732 (incorrect
 permission assignment) reads its mode/mask immediate out of the AAPCS64 argument
 register (`x1`/`w1` for `chmod`, `x2`/`w2` for `fchmodat`, `x0`/`w0` for `umask`,
-including the `mov w0, wzr` zero-register encoding of `umask(0)`), so it runs on
-both architectures and is excluded from the AArch64 skip set. A freestanding
-AArch64 fixture (`tests/fixtures/cwe732-aarch64-vuln`) plus unit and slow tests
-lock the behavior. **Still skipped on AArch64:** the stack-slot/alias
-register-level checks (CWE-119/369/415/416/476/134/787), which rely on x86_64
-`rbp`/`rsp`/`rdi`/`rax` spill conventions. Porting those (the slot-tracking
-abstraction the caveat below describes) is the remaining work for this item.
+including the `mov w0, wzr` zero-register encoding of `umask(0)`). **CWE-190
+(integer overflow into an allocator size) was previously listed as
+"call-site-driven" but actually inspects the 32-bit size-arithmetic register
+before the allocator call — and its detection logic recognized only x86 mnemonics
+(`imul`/`shl`/`sal`/`lea`) and `e**`/`r**d` registers, so it silently found
+nothing on AArch64 despite being in the arch-agnostic set.** The arithmetic
+discovery has now been moved into the arch-aware engine helper
+`size_arith_before_call`, which recognizes the AArch64 forms too
+(`mul`/`madd`/`add`/`lsl` over `w0..w30` — `count * 4096` → `lsl w8, w8, #0xc`
+(medium), `count * width` → `mul w8, w8, w9` (high)). Freestanding AArch64
+fixtures (`tests/fixtures/cwe732-aarch64-vuln`, `tests/fixtures/cwe190-aarch64-vuln`)
+plus unit and slow tests lock both behaviors. **Still skipped on AArch64:** the
+stack-slot/alias register-level checks (CWE-119/369/415/416/476/134/787), which
+rely on x86_64 `rbp`/`rsp`/`rdi`/`rax` spill conventions. Porting those (the
+slot-tracking abstraction the caveat below describes) is the remaining work for
+this item.
 
 **What it is:** Lift the v0.1 x86_64-only scope guard to also accept
 `aarch64`/`arm64` ELF binaries.
@@ -137,11 +146,16 @@ abstraction the caveat below describes) is the remaining work for this item.
   regex hardcodes `rbp`/`rsp`. AArch64 uses `x0`–`x30`, `sp`, `fp` instead.
   Making slot-tracking arch-aware (a `platform.py` abstraction keyed on
   `engine.project.arch.name`) is the implementation challenge.
-- CWE-78 and CWE-190 are simpler: they rely only on call-site discovery and
-  mnemonic scanning, which capstone renders correctly for AArch64.
-- A reasonable Phase 2 scope: add AArch64 support to CWE-78 and CWE-190 only,
-  document the CWE-119/416 x86_64-only constraint explicitly, and update
-  `assert_supported()` to allow `AARCH64` with a check-level scope note.
+- CWE-78 is the simplest: it relies only on call-site discovery, which capstone
+  renders correctly for AArch64. **(Correction:** CWE-190 was originally assumed
+  to be in the same purely-call-site bucket, but it inspects the size-arithmetic
+  register and so needed arch-aware mnemonic/register recognition for AArch64 —
+  now shipped via `size_arith_before_call`. CWE-732 and CWE-190 are the two
+  register-level checks made arch-aware so far.)
+- Remaining Phase 2 scope: port the stack-slot/alias register-level checks
+  (CWE-119/369/415/416/476/134/787) — the slot-tracking abstraction below — to
+  AArch64; the call-site checks and the two arch-aware register-level checks
+  (CWE-732, CWE-190) already run there.
 
 **Feasibility caveat:** Building AArch64 fixtures requires an AArch64 cross-compiler
 (`aarch64-linux-gnu-gcc`) or QEMU. Alfred's host is x86_64 — confirm toolchain

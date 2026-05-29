@@ -36,7 +36,7 @@ all: $(BINS) aarch64
 %: %.c
 	$(CC) $(ARCH) $(CFLAGS) -o $@ $<
 
-aarch64: cwe78-aarch64-vuln cwe732-aarch64-vuln
+aarch64: cwe78-aarch64-vuln cwe732-aarch64-vuln cwe190-aarch64-vuln
 
 cwe78-aarch64-vuln: cwe78-aarch64-vuln.c cwe78-aarch64-stubs.c
 	$(AARCH64_CC) $(AARCH64_TARGET) $(AARCH64_CFLAGS) -c cwe78-aarch64-vuln.c -o cwe78-aarch64-vuln.o
@@ -53,6 +53,17 @@ cwe732-aarch64-vuln: cwe732-aarch64-vuln.c cwe732-aarch64-stubs.c
 	$(AARCH64_LD) -o $@ cwe732-aarch64-vuln.o cwe732-aarch64-stubs.o -e _start --no-dynamic-linker
 	rm -f cwe732-aarch64-vuln.o cwe732-aarch64-stubs.o
 
+# AArch64 CWE-190 fixture: exercises the arch-aware register-level integer-
+# overflow check. The 32-bit size arithmetic (`lsl w8, w8, #0xc` for
+# `count * 4096`) is found before the `bl malloc` call. Same freestanding
+# cross-build recipe as CWE-78/CWE-732.
+cwe190-aarch64-vuln: cwe190-aarch64-vuln.c cwe190-aarch64-stubs.c
+	$(AARCH64_CC) $(AARCH64_TARGET) $(AARCH64_CFLAGS) -c cwe190-aarch64-vuln.c -o cwe190-aarch64-vuln.o
+	$(AARCH64_CC) $(AARCH64_TARGET) $(AARCH64_CFLAGS) -c cwe190-aarch64-stubs.c -o cwe190-aarch64-stubs.o
+	$(AARCH64_LD) -o $@ cwe190-aarch64-vuln.o cwe190-aarch64-stubs.o -e _start --no-dynamic-linker
+	rm -f cwe190-aarch64-vuln.o cwe190-aarch64-stubs.o
+
 clean:
 	rm -f $(BINS) cwe78-aarch64-vuln cwe78-aarch64-vuln.o cwe78-aarch64-stubs.o \
-		cwe732-aarch64-vuln cwe732-aarch64-vuln.o cwe732-aarch64-stubs.o
+		cwe732-aarch64-vuln cwe732-aarch64-vuln.o cwe732-aarch64-stubs.o \
+		cwe190-aarch64-vuln cwe190-aarch64-vuln.o cwe190-aarch64-stubs.o

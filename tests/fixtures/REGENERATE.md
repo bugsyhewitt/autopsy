@@ -21,6 +21,7 @@ run without a compiler. This file documents how to regenerate them if needed.
 | `cwe476-vuln.c` / `cwe476-vuln` | source + binary: NULL pointer dereference (`malloc()` result dereferenced with no NULL-check in `risky_fill()`); the NULL-checked `safe_fill()` and `safe_env()` must not be flagged |
 | `cwe78-aarch64-vuln.c` + `cwe78-aarch64-stubs.c` / `cwe78-aarch64-vuln` | source + binary: **AArch64** OS command injection (exercises ARM64 call-site support) |
 | `cwe732-aarch64-vuln.c` + `cwe732-aarch64-stubs.c` / `cwe732-aarch64-vuln` | source + binary: **AArch64** incorrect permission assignment (exercises the arch-aware register-level CWE-732 check on ARM64) |
+| `cwe190-aarch64-vuln.c` + `cwe190-aarch64-stubs.c` / `cwe190-aarch64-vuln` | source + binary: **AArch64** integer overflow into allocator size (exercises the arch-aware register-level CWE-190 check on ARM64) |
 | `clean-baseline.c` / `clean-baseline` | source + binary: none of the four classes (zero-false-positive check) |
 | `Makefile` | build rules |
 
@@ -117,6 +118,23 @@ You should see `mov w1, #0x1ff` (0o777) and `mov w1, #0x1b6` (0o666) before
 their `bl <chmod>` calls and `mov w0, wzr` (umask(0)) before its `bl <umask>`,
 with the restrictive `mov w1, #0x180` (0o600) and `mov w0, #0x3f` (0o077) that
 must stay unflagged.
+
+`cwe190-aarch64-vuln` exercises the **arch-aware register-level** CWE-190
+integer-overflow check on AArch64: the 32-bit size arithmetic before the
+`bl <malloc>` call is the overflow surface. `count * 4096` lowers to
+`lsl w8, w8, #0xc` (a register source plus an immediate shift -> medium
+confidence, mirroring the x86_64 `shl eax, 0xc`); a `count * width` multiply
+would lower to `mul w8, w8, w9` (two register sources -> high). The check pairs
+that arithmetic with the attacker-input source (`fgets`/`atoi`). Same
+freestanding cross-build recipe (stub libc in `cwe190-aarch64-stubs.c`). Verify
+the codegen with:
+
+```bash
+llvm-objdump -d cwe190-aarch64-vuln | grep -A10 '<alloc_records>:'
+```
+
+You should see `lsl w8, w8, #0xc` followed (a few instructions later) by
+`bl ... <malloc>`, with `bl ... <fgets>` and `bl ... <atoi>` in `main`.
 
 Toolchain:
 

@@ -16,8 +16,8 @@ within a function and across a single call hop. It is slower and deeper by
 design.
 
 > **Scope:** ELF only. Full check coverage on x86_64; the call-site-driven
-> checks (CWE-78/190/338/367/377/676) plus the arch-aware permission check
-> (CWE-732) also run on AArch64. See
+> checks (CWE-78/338/367/377/676) plus the arch-aware register-level checks
+> (CWE-732, CWE-190) also run on AArch64. See
 > [Architecture support](#architecture-support) and
 > [What autopsy is not](#what-autopsy-is-not).
 
@@ -172,13 +172,17 @@ never written from, nor applied to, a half-finished run.
 | Architecture | Checks that run |
 |---|---|
 | **x86_64 (AMD64)** | all checks (CWE-119, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787) |
-| **AArch64 (ARM64)** | the call-site-driven checks (**CWE-78**, **CWE-190**, **CWE-338**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level permission check (**CWE-732**) |
+| **AArch64 (ARM64)** | the call-site-driven checks (**CWE-78**, **CWE-338**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**) |
 
 On an AArch64 target, the **CWE-732** permission check runs natively: its register
 reasoning only reads a single mode/mask *immediate* out of the AAPCS64 argument
 register (`w1` for `chmod`, `w0` for `umask`, including the `mov w0, wzr`
 zero-register encoding of `umask(0)`), so it is arch-aware rather than
-x86_64-bound. The remaining register-level checks
+x86_64-bound. The **CWE-190** integer-overflow check is likewise arch-aware: it
+inspects the 32-bit size-arithmetic register before the allocator call, and the
+engine knows both the x86_64 forms (`imul`/`shl` over `e**`/`r**d`) and the
+AArch64 forms (`mul`/`lsl` over `w0..w30` — e.g. `count * 4096` lowers to
+`lsl w8, w8, #0xc`), so it runs on AArch64 too. The remaining register-level checks
 (CWE-119/369/415/416/476/134/787) rely on x86_64 stack-slot/register conventions,
 so they are **skipped** rather than producing unsound results. Skipped checks are
 listed in the report's `skipped_checks` array and noted on stderr:
@@ -295,6 +299,16 @@ autopsy --binary tests/fixtures/cwe190-vuln --checks 190 --format json
   "confidence": "medium"
 }
 ```
+
+This is an **arch-aware register-level** detector: it inspects the 32-bit
+size-arithmetic register feeding the allocator call. The engine knows both the
+x86_64 forms (`imul`/`mul`/`add`/`shl`/`sal`/`lea` over the `e**`/`r**d` views)
+and the AArch64 forms (`mul`/`madd`/`add`/`lsl` over `w0..w30` — e.g.
+`count * 4096` lowers to `lsl w8, w8, #0xc`, `count * width` to `mul w8, w8, w9`),
+so — like CWE-732 — it runs on **both x86_64 and AArch64** (the
+`tests/fixtures/cwe190-aarch64-vuln` ARM64 fixture exercises it). An op that
+combines two distinct register sources (both potentially tainted) is reported
+`high`; a register-plus-immediate op (one symbolic operand) is `medium`.
 
 ### CWE-415 — double-free (intra-procedural and single-hop interprocedural)
 
@@ -813,7 +827,7 @@ the weakness CWE-367 names.
 The detector is **call-site-driven**: it walks each function in address order
 and pairs a by-name *check* call (`access`/`faccessat`/`stat`/`lstat` and
 variants) with the first by-name *use* call that follows it. It resolves direct
-calls by symbol name and never inspects registers, so — like CWE-78/190/338/377/
+calls by symbol name and never inspects registers, so — like CWE-78/338/377/
 676 — it runs on **both x86_64 and AArch64**. The finding is anchored at the
 time-of-use and records both program points in its `taint_trace`.
 
@@ -886,8 +900,8 @@ regeneration. See `tests/fixtures/REGENERATE.md`.
 
 - No PE binary support (ELF only).
 - No architectures beyond x86_64 and AArch64 (and AArch64 runs the
-  call-site-driven checks plus the arch-aware CWE-732 permission check — see
-  [Architecture support](#architecture-support)).
+  call-site-driven checks plus the arch-aware register-level checks CWE-732 and
+  CWE-190 — see [Architecture support](#architecture-support)).
 - No bare-metal / firmware targets.
 - No symbolic execution to PoC input generation.
 - No performance optimization pass.
