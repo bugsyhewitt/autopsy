@@ -36,7 +36,7 @@ all: $(BINS) aarch64
 %: %.c
 	$(CC) $(ARCH) $(CFLAGS) -o $@ $<
 
-aarch64: cwe78-aarch64-vuln cwe732-aarch64-vuln cwe190-aarch64-vuln
+aarch64: cwe78-aarch64-vuln cwe732-aarch64-vuln cwe190-aarch64-vuln cwe134-aarch64-vuln
 
 cwe78-aarch64-vuln: cwe78-aarch64-vuln.c cwe78-aarch64-stubs.c
 	$(AARCH64_CC) $(AARCH64_TARGET) $(AARCH64_CFLAGS) -c cwe78-aarch64-vuln.c -o cwe78-aarch64-vuln.o
@@ -63,7 +63,20 @@ cwe190-aarch64-vuln: cwe190-aarch64-vuln.c cwe190-aarch64-stubs.c
 	$(AARCH64_LD) -o $@ cwe190-aarch64-vuln.o cwe190-aarch64-stubs.o -e _start --no-dynamic-linker
 	rm -f cwe190-aarch64-vuln.o cwe190-aarch64-stubs.o
 
+# AArch64 CWE-134 fixture: exercises the arch-aware register-level
+# uncontrolled-format-string check. The printf-family format argument is read
+# out of the AAPCS64 argument register (`x0` for printf, `x1` for fprintf); a
+# stack-slot reload (`ldr x0, [sp, #N]`) is the non-literal/attacker-controlled
+# format, while the safe `log_line()` materializes a rodata literal via
+# `adrp`/`adr`. Same freestanding cross-build recipe as CWE-78/CWE-732/CWE-190.
+cwe134-aarch64-vuln: cwe134-aarch64-vuln.c cwe134-aarch64-stubs.c
+	$(AARCH64_CC) $(AARCH64_TARGET) $(AARCH64_CFLAGS) -c cwe134-aarch64-vuln.c -o cwe134-aarch64-vuln.o
+	$(AARCH64_CC) $(AARCH64_TARGET) $(AARCH64_CFLAGS) -c cwe134-aarch64-stubs.c -o cwe134-aarch64-stubs.o
+	$(AARCH64_LD) -o $@ cwe134-aarch64-vuln.o cwe134-aarch64-stubs.o -e _start --no-dynamic-linker
+	rm -f cwe134-aarch64-vuln.o cwe134-aarch64-stubs.o
+
 clean:
 	rm -f $(BINS) cwe78-aarch64-vuln cwe78-aarch64-vuln.o cwe78-aarch64-stubs.o \
 		cwe732-aarch64-vuln cwe732-aarch64-vuln.o cwe732-aarch64-stubs.o \
-		cwe190-aarch64-vuln cwe190-aarch64-vuln.o cwe190-aarch64-stubs.o
+		cwe190-aarch64-vuln cwe190-aarch64-vuln.o cwe190-aarch64-stubs.o \
+		cwe134-aarch64-vuln cwe134-aarch64-vuln.o cwe134-aarch64-stubs.o

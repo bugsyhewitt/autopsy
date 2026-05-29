@@ -123,20 +123,26 @@ class AngrEngine:
     #     an allocator size) inspects the 32-bit size-arithmetic register before
     #     the allocator call; ``size_arith_before_call`` knows both the x86_64
     #     (imul/shl over e**/r**d) and AArch64 (mul/lsl over w0..w30) forms, so
-    #     it is sound on AArch64 too.
+    #     it is sound on AArch64 too. CWE-134 (uncontrolled format string)
+    #     inspects the printf-family *format-string* argument register before
+    #     the call; ``format_string_sinks_with_nonliteral_format`` knows both
+    #     the SysV/x86_64 (``rdi``/``rsi``/``rdx``; literal via ``lea
+    #     [rip+disp]``) and the AArch64 (``x0``/``x1``/``x2``; literal via
+    #     ``adrp``/``adr``, stack reload via ``ldr``) forms, so it is sound on
+    #     AArch64 too.
     #
-    # The remaining register-level checks (CWE-119/415/416/476/134/787/369)
-    # still rely on x86_64 stack-slot/alias conventions and are skipped on
-    # AArch64.
-    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 190, 338, 367, 377, 676, 732)
+    # The remaining register-level checks (CWE-119/415/416/476/787/369) still
+    # rely on x86_64 stack-slot/alias conventions and are skipped on AArch64.
+    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 134, 190, 338, 367, 377, 676, 732)
 
     def assert_supported(self) -> None:
         """Reject targets on architectures autopsy cannot analyze.
 
         x86_64 (AMD64) is fully supported. AArch64 (ARM64) is supported for the
-        arch-agnostic checks — the call-site-driven ones (CWE-78/190/338/367/
-        377/676) and the arch-aware CWE-732 permission check; the remaining
-        register-level checks (CWE-119/415/416/476/134/787/369) use x86_64
+        arch-agnostic checks — the call-site-driven ones (CWE-78/338/367/377/
+        676) and the arch-aware register-level checks (CWE-190 integer overflow,
+        CWE-732 permission assignment, CWE-134 uncontrolled format string); the
+        remaining register-level checks (CWE-119/415/416/476/787/369) use x86_64
         register conventions and report no findings on AArch64 — see
         :meth:`checks_supported_on_arch`.
         """
@@ -582,6 +588,41 @@ class AngrEngine:
         "warnx": "rdi",           # warnx(fmt, ...)
     }
 
+    # The same printf-family sinks mapped to the AArch64 AAPCS64 argument
+    # register that carries their *format string*. AAPCS64 passes the first
+    # integer/pointer arguments in x0, x1, x2, ...; the format string sits at
+    # the same parameter position as on SysV, so the index mapping is identical
+    # (printf -> x0, fprintf/sprintf/syslog -> x1, snprintf -> x2). A pointer
+    # argument is a full 64-bit value, so the format register is always the
+    # x-view (no 32-bit w-view to track, unlike the mode/mask immediates of
+    # CWE-732).
+    _FORMAT_SINK_FMT_REG_AARCH64: dict[str, str] = {
+        "printf": "x0",           # printf(fmt, ...)
+        "vprintf": "x0",          # vprintf(fmt, va)
+        "fprintf": "x1",          # fprintf(stream, fmt, ...)
+        "vfprintf": "x1",         # vfprintf(stream, fmt, va)
+        "sprintf": "x1",          # sprintf(buf, fmt, ...)
+        "vsprintf": "x1",         # vsprintf(buf, fmt, va)
+        "snprintf": "x2",         # snprintf(buf, size, fmt, ...)
+        "vsnprintf": "x2",        # vsnprintf(buf, size, fmt, va)
+        "dprintf": "x1",          # dprintf(fd, fmt, ...)
+        "syslog": "x1",           # syslog(priority, fmt, ...)
+        "vsyslog": "x1",          # vsyslog(priority, fmt, va)
+        "err": "x1",              # err(eval, fmt, ...)
+        "warn": "x0",             # warn(fmt, ...)
+        "errx": "x1",             # errx(eval, fmt, ...)
+        "warnx": "x0",            # warnx(fmt, ...)
+    }
+
+    def _format_sink_fmt_reg_map(self) -> dict[str, str] | None:
+        """Per-arch printf-family format-register map, or ``None`` if unsupported."""
+        arch = self.project.arch.name
+        if arch == "AMD64":
+            return self._FORMAT_SINK_FMT_REG
+        if arch == "AARCH64":
+            return self._FORMAT_SINK_FMT_REG_AARCH64
+        return None
+
     def format_string_sinks_with_nonliteral_format(self) -> list[dict]:
         """Find printf-family calls whose format argument is not a string literal.
 
@@ -604,32 +645,25 @@ class AngrEngine:
                 "function":    caller function name,
                 "call_address": address of the call instruction,
                 "sink_name":   the printf-family symbol,
-                "fmt_reg":     the format-argument register (e.g. "rdi"),
+                "fmt_reg":     the format-argument register (e.g. "rdi" / "x0"),
                 "fmt_slot":    the stack slot the format pointer was loaded from,
             }
 
-        x86_64 only: the format-argument register mapping uses the SysV calling
-        convention and the slot/aliasing tracking assumes -O0 stack-slot spill
-        conventions. AArch64 register conventions differ, so this returns no
-        sinks on non-AMD64 targets (the caller check is arch-gated upstream).
+        x86_64 (AMD64) and AArch64 (ARM64): the format-argument register mapping
+        is per-architecture (SysV ``rdi``/``rsi``/``rdx`` on x86_64; AAPCS64
+        ``x0``/``x1``/``x2`` on AArch64), and the slot/aliasing/literal tracking
+        recognizes both the x86_64 form (``lea reg, [rip+disp]`` / immediate for
+        a rodata literal, ``mov reg, [rbp-N]`` for a stack-slot reload) and the
+        AArch64 form (``adrp``/``adr`` for a rodata literal, ``ldr reg, [sp/x29
+        +N]`` / ``ldur`` for a stack-slot reload). Returns an empty list on any
+        other architecture (the caller check is arch-gated upstream).
         """
-        import re
-
-        if self.project.arch.name != "AMD64":
+        fmt_reg_for_sink = self._format_sink_fmt_reg_map()
+        if fmt_reg_for_sink is None:
             return []
 
         cfg = self.cfg()
         call_mnemonics = self._call_mnemonics()
-
-        # reg <- [rbp/rsp +/- N]: a stack-slot reload (non-literal format).
-        load_slot = re.compile(
-            r"^(r[a-z0-9]+),\s*(?:qword ptr )?\[(rbp|rsp)\s*([+\-]\s*(?:0x[0-9a-f]+|\d+))\]$"
-        )
-        # reg <- reg: a register copy (alias propagation).
-        reg_copy = re.compile(r"^(r[a-z0-9]+),\s*(r[a-z0-9]+)$")
-        # reg <- [rip + disp] (lea) or an immediate: a constant rodata pointer.
-        lea_rip = re.compile(r"^(r[a-z0-9]+),\s*(?:qword ptr )?\[rip\s*[+\-]")
-        mov_imm = re.compile(r"^(r[a-z0-9]+),\s*(?:0x[0-9a-f]+|\d+)$")
 
         results: list[dict] = []
         for func in cfg.kb.functions.values():
@@ -647,40 +681,12 @@ class AngrEngine:
                 if insn.mnemonic not in call_mnemonics:
                     continue
                 target = self._resolve_call_target(insn, cfg)
-                fmt_reg = self._FORMAT_SINK_FMT_REG.get(target)
+                fmt_reg = fmt_reg_for_sink.get(target)
                 if fmt_reg is None:
                     continue
 
-                # Walk back from the call resolving how the format register was
-                # last set. Track the set of registers currently aliasing the
-                # format register so a `mov fmt_reg, rax; mov rax, [slot]`
-                # sequence is followed correctly.
-                fmt_aliases: set[str] = {fmt_reg}
-                fmt_slot: str | None = None
-                literal = False
-                for prev in reversed(insns[max(0, idx - 12): idx]):
-                    if prev.mnemonic == "lea":
-                        ml = lea_rip.match(prev.op_str)
-                        if ml and ml.group(1) in fmt_aliases:
-                            literal = True
-                            break
-                    if prev.mnemonic == "mov":
-                        # lea-style not used, but a direct immediate address.
-                        mi = mov_imm.match(prev.op_str)
-                        if mi and mi.group(1) in fmt_aliases:
-                            literal = True
-                            break
-                        ms = load_slot.match(prev.op_str)
-                        if ms and ms.group(1) in fmt_aliases:
-                            fmt_slot = f"{ms.group(2)}{ms.group(3).replace(' ', '')}"
-                            break
-                        mc = reg_copy.match(prev.op_str)
-                        if mc and mc.group(1) in fmt_aliases:
-                            # dest aliases the format reg; its source now does too.
-                            fmt_aliases.add(mc.group(2))
-                            continue
-
-                if literal or fmt_slot is None:
+                fmt_slot = self._resolve_format_arg_slot(insns, idx, fmt_reg)
+                if fmt_slot is None:
                     # Either a confirmed string literal, or we could not prove
                     # the format came from a stack slot — stay conservative and
                     # do not flag (zero-false-positive guarantee).
@@ -696,6 +702,96 @@ class AngrEngine:
                     }
                 )
         return results
+
+    def _resolve_format_arg_slot(
+        self, insns: list[Any], call_idx: int, fmt_reg: str
+    ) -> str | None:
+        """Resolve a printf-family format-arg register to its source stack slot.
+
+        Walks back from the call at ``insns[call_idx]`` to determine how
+        ``fmt_reg`` was last set, following register-copy aliases. Returns the
+        stack-slot name the format pointer was reloaded from (the non-literal /
+        possibly attacker-controlled case) or ``None`` if the format is a
+        compile-time string literal (set from a rodata pointer / immediate
+        address) or the source could not be resolved — the conservative outcome
+        that preserves the zero-false-positive posture.
+
+        Architecture-aware. On x86_64 a literal is ``lea reg, [rip+disp]`` (or an
+        immediate move) and a non-literal is ``mov reg, [rbp-N]``/``[rsp+N]``. On
+        AArch64 a literal materializes the rodata pointer with ``adrp``/``adr``
+        and a non-literal reloads from a stack slot with ``ldr reg, [sp/x29
+        +N]``/``ldur``.
+        """
+        import re
+
+        if self.project.arch.name == "AARCH64":
+            # AArch64 (AAPCS64). A pointer argument is a full 64-bit value, so
+            # the format register and its aliases are tracked in the x-view.
+            base = fmt_reg[1:]  # "x0" -> "0"
+            fmt_aliases: set[str] = {f"x{base}", f"w{base}"}
+            # reg <- [sp/x29 +/- N]: a stack-slot reload (non-literal format).
+            load_slot = re.compile(
+                r"^([wx][0-9a-z]+),\s*\[(sp|x29|fp)(?:,\s*#([+\-]?(?:0x[0-9a-f]+|\d+)))?\]"
+            )
+            # reg <- reg: a register copy (alias propagation).
+            reg_copy = re.compile(r"^([wx][0-9a-z]+),\s*([wx][0-9a-z]+)$")
+            # The stack-slot load mnemonics -O0 uses to reload a spilled pointer.
+            load_like = {"ldr", "ldur"}
+            for prev in reversed(insns[max(0, call_idx - 14): call_idx]):
+                mnem = prev.mnemonic
+                if mnem in ("adrp", "adr"):
+                    # A rodata pointer materialization -> compile-time literal.
+                    md = re.match(r"^([wx][0-9a-z]+),", prev.op_str)
+                    if md and self._aarch64_reg_in(md.group(1), fmt_aliases):
+                        return None
+                    continue
+                if mnem in load_like:
+                    ms = load_slot.match(prev.op_str)
+                    if ms and self._aarch64_reg_in(ms.group(1), fmt_aliases):
+                        disp = ms.group(3)
+                        slot = f"{ms.group(2)}{('+' + disp) if disp and not disp.startswith(('+', '-')) else (disp or '')}"
+                        return slot
+                    continue
+                if mnem in ("mov", "orr"):
+                    mc = reg_copy.match(prev.op_str)
+                    if mc and self._aarch64_reg_in(mc.group(1), fmt_aliases):
+                        src = mc.group(2)
+                        fmt_aliases = fmt_aliases | {src, "x" + src[1:], "w" + src[1:]}
+                        continue
+            return None
+
+        # x86_64 (SysV). Track the format register and its aliases; a literal is
+        # set via `lea reg, [rip+disp]` or an immediate, a non-literal reloads a
+        # stack slot.
+        fmt_aliases = {fmt_reg}
+        # reg <- [rbp/rsp +/- N]: a stack-slot reload (non-literal format).
+        load_slot = re.compile(
+            r"^(r[a-z0-9]+),\s*(?:qword ptr )?\[(rbp|rsp)\s*([+\-]\s*(?:0x[0-9a-f]+|\d+))\]$"
+        )
+        # reg <- reg: a register copy (alias propagation).
+        reg_copy = re.compile(r"^(r[a-z0-9]+),\s*(r[a-z0-9]+)$")
+        # reg <- [rip + disp] (lea) or an immediate: a constant rodata pointer.
+        lea_rip = re.compile(r"^(r[a-z0-9]+),\s*(?:qword ptr )?\[rip\s*[+\-]")
+        mov_imm = re.compile(r"^(r[a-z0-9]+),\s*(?:0x[0-9a-f]+|\d+)$")
+        for prev in reversed(insns[max(0, call_idx - 12): call_idx]):
+            if prev.mnemonic == "lea":
+                ml = lea_rip.match(prev.op_str)
+                if ml and ml.group(1) in fmt_aliases:
+                    return None  # confirmed string literal
+            if prev.mnemonic == "mov":
+                # lea-style not used, but a direct immediate address.
+                mi = mov_imm.match(prev.op_str)
+                if mi and mi.group(1) in fmt_aliases:
+                    return None  # confirmed string literal
+                ms = load_slot.match(prev.op_str)
+                if ms and ms.group(1) in fmt_aliases:
+                    return f"{ms.group(2)}{ms.group(3).replace(' ', '')}"
+                mc = reg_copy.match(prev.op_str)
+                if mc and mc.group(1) in fmt_aliases:
+                    # dest aliases the format reg; its source now does too.
+                    fmt_aliases.add(mc.group(2))
+                    continue
+        return None
 
     # Bulk-copy/fill sinks mapped to the SysV/x86_64 register that carries their
     # *length* (byte-count) argument. ``strcpy`` is deliberately absent: it takes

@@ -104,7 +104,7 @@ def to_sarif(report: Report) -> dict:
 
 ## Tier 2 — High value, moderate scope
 
-### 3. AArch64 (ARM64) architecture support — 🟡 PARTIAL (call-site checks + CWE-732 + CWE-190)
+### 3. AArch64 (ARM64) architecture support — 🟡 PARTIAL (call-site checks + CWE-732 + CWE-190 + CWE-134)
 
 **Status:** In progress. The v0.1 x86_64-only scope guard has been lifted —
 `assert_supported()` accepts `AARCH64`, `_resolve_call_target` parses the
@@ -123,13 +123,20 @@ nothing on AArch64 despite being in the arch-agnostic set.** The arithmetic
 discovery has now been moved into the arch-aware engine helper
 `size_arith_before_call`, which recognizes the AArch64 forms too
 (`mul`/`madd`/`add`/`lsl` over `w0..w30` — `count * 4096` → `lsl w8, w8, #0xc`
-(medium), `count * width` → `mul w8, w8, w9` (high)). Freestanding AArch64
-fixtures (`tests/fixtures/cwe732-aarch64-vuln`, `tests/fixtures/cwe190-aarch64-vuln`)
-plus unit and slow tests lock both behaviors. **Still skipped on AArch64:** the
-stack-slot/alias register-level checks (CWE-119/369/415/416/476/134/787), which
-rely on x86_64 `rbp`/`rsp`/`rdi`/`rax` spill conventions. Porting those (the
-slot-tracking abstraction the caveat below describes) is the remaining work for
-this item.
+(medium), `count * width` → `mul w8, w8, w9` (high)). **CWE-134 (uncontrolled
+format string) is now arch-aware too:** the engine helper
+`format_string_sinks_with_nonliteral_format` reads the printf-family
+format-string argument out of the AAPCS64 register (`x0` for `printf`, `x1` for
+`fprintf`/`sprintf`/`syslog`, `x2` for `snprintf`) and recognizes both the
+x86_64 rodata-literal form (`lea reg, [rip+disp]`) and the AArch64 one
+(`adrp`/`adr`), treating a stack-slot reload (`ldr xN, [sp, #N]`) as the
+non-literal/attacker-controlled format. Freestanding AArch64 fixtures
+(`tests/fixtures/cwe732-aarch64-vuln`, `tests/fixtures/cwe190-aarch64-vuln`,
+`tests/fixtures/cwe134-aarch64-vuln`) plus unit and slow tests lock all three
+behaviors. **Still skipped on AArch64:** the stack-slot/alias register-level
+checks (CWE-119/369/415/416/476/787), which rely on x86_64 `rbp`/`rsp`/`rdi`/
+`rax` spill conventions. Porting those (the slot-tracking abstraction the caveat
+below describes) is the remaining work for this item.
 
 **What it is:** Lift the v0.1 x86_64-only scope guard to also accept
 `aarch64`/`arm64` ELF binaries.
@@ -153,9 +160,9 @@ this item.
   now shipped via `size_arith_before_call`. CWE-732 and CWE-190 are the two
   register-level checks made arch-aware so far.)
 - Remaining Phase 2 scope: port the stack-slot/alias register-level checks
-  (CWE-119/369/415/416/476/134/787) — the slot-tracking abstraction below — to
-  AArch64; the call-site checks and the two arch-aware register-level checks
-  (CWE-732, CWE-190) already run there.
+  (CWE-119/369/415/416/476/787) — the slot-tracking abstraction below — to
+  AArch64; the call-site checks and the three arch-aware register-level checks
+  (CWE-732, CWE-190, CWE-134) already run there.
 
 **Feasibility caveat:** Building AArch64 fixtures requires an AArch64 cross-compiler
 (`aarch64-linux-gnu-gcc`) or QEMU. Alfred's host is x86_64 — confirm toolchain
@@ -277,10 +284,14 @@ shape. The check (`autopsy/checks/cwe134.py`) requires both a non-literal format
 sink and at least one attacker-controlled input source in the program (the same
 `_SOURCES` set as CWE-78), and reports `confidence: "medium"` — the non-literal
 format is a tight structural signal but the analysis does not prove a
-register-level def-use chain from the specific read to the format slot. x86_64
-only (register-level; skipped on AArch64). A fixture `tests/fixtures/cwe134-vuln`
-exercises the vulnerable `printf(user)` and a safe literal-format companion that
-must not fire. CWE-134 is rank #25 region of the historical CWE Top 25 and a
+register-level def-use chain from the specific read to the format slot. **Now
+arch-aware: runs on both x86_64 and AArch64** — the engine helper reads the
+format-string argument out of the per-architecture register (SysV
+`rdi`/`rsi`/`rdx`; AAPCS64 `x0`/`x1`/`x2`) and recognizes both the x86_64
+rodata-literal form (`lea [rip+disp]`) and the AArch64 one (`adrp`/`adr`). A
+fixture `tests/fixtures/cwe134-vuln` (x86_64) exercises the vulnerable
+`printf(user)` and a safe literal-format companion that must not fire;
+`tests/fixtures/cwe134-aarch64-vuln` mirrors it on ARM64. CWE-134 is rank #25 region of the historical CWE Top 25 and a
 staple of the printf-family weakness class; full VEX-IR source→format taint is
 the post-v0.1 deepening (see Tier 3 item #9).
 

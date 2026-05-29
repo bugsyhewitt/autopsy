@@ -22,6 +22,7 @@ run without a compiler. This file documents how to regenerate them if needed.
 | `cwe78-aarch64-vuln.c` + `cwe78-aarch64-stubs.c` / `cwe78-aarch64-vuln` | source + binary: **AArch64** OS command injection (exercises ARM64 call-site support) |
 | `cwe732-aarch64-vuln.c` + `cwe732-aarch64-stubs.c` / `cwe732-aarch64-vuln` | source + binary: **AArch64** incorrect permission assignment (exercises the arch-aware register-level CWE-732 check on ARM64) |
 | `cwe190-aarch64-vuln.c` + `cwe190-aarch64-stubs.c` / `cwe190-aarch64-vuln` | source + binary: **AArch64** integer overflow into allocator size (exercises the arch-aware register-level CWE-190 check on ARM64) |
+| `cwe134-aarch64-vuln.c` + `cwe134-aarch64-stubs.c` / `cwe134-aarch64-vuln` | source + binary: **AArch64** uncontrolled format string (exercises the arch-aware register-level CWE-134 check on ARM64) |
 | `clean-baseline.c` / `clean-baseline` | source + binary: none of the four classes (zero-false-positive check) |
 | `Makefile` | build rules |
 
@@ -135,6 +136,26 @@ llvm-objdump -d cwe190-aarch64-vuln | grep -A10 '<alloc_records>:'
 
 You should see `lsl w8, w8, #0xc` followed (a few instructions later) by
 `bl ... <malloc>`, with `bl ... <fgets>` and `bl ... <atoi>` in `main`.
+
+`cwe134-aarch64-vuln` exercises the **arch-aware register-level** CWE-134
+uncontrolled-format-string check on AArch64: the printf-family *format-string*
+argument is read out of the AAPCS64 argument register (`x0` for printf, `x1` for
+fprintf) just before the `bl` call. A stack-slot reload (`ldr x0, [sp, #N]`) is
+the non-literal/attacker-controlled format the check flags; the safe `log_line()`
+materializes a rodata literal via `adrp`/`adr` and must NOT fire. The check pairs
+the non-literal format with the attacker-input source (`fgets` in `main`). Same
+freestanding cross-build recipe (stub libc in `cwe134-aarch64-stubs.c`). Verify
+the codegen with:
+
+```bash
+llvm-objdump -d cwe134-aarch64-vuln | grep -A12 '<emit>:'
+llvm-objdump -d cwe134-aarch64-vuln | grep -A14 '<log_line>:'
+```
+
+You should see `ldr x0, [sp, #0x8]` then `bl ... <printf>` in `<emit>` (the
+vulnerable non-literal format), and `adr x0, ...` (or `adrp x0`) then
+`bl ... <printf>` in `<log_line>` (the safe rodata literal that must stay
+unflagged).
 
 Toolchain:
 
