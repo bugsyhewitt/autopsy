@@ -600,15 +600,57 @@ def test_aarch64_runs_cwe369_under_all(require_angr, fixtures_dir):
     )
 
 
+def test_cwe119_detected_on_aarch64(require_angr, fixtures_dir):
+    # AArch64 (ARM64) support for the arch-aware register-level CWE-119 check:
+    # the int index is sign-extended (`ldrsw x10, [sp, #N]`), the buffer address
+    # is formed with an explicit base+index sum (`add x9, x9, x10`), and the
+    # store dereferences that base register (`strb w8, [x9]`) with no preceding
+    # bounds check — the register-indexed buffer write. The safe companion
+    # range-checks the index (`tbnz`/`subs` + `b.<cond>`) and must NOT fire.
+    rep = _analyze(fixtures_dir, "cwe119-aarch64-vuln", "119")
+    d = rep.to_dict()
+    assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
+    cwe119 = [f for f in d["findings"] if f["cwe"] == 119]
+    assert cwe119, f"expected a CWE-119 finding on aarch64, got {d['findings']}"
+    for f in cwe119:
+        _assert_finding_contract(f, 119)
+    funcs = {f["function"] for f in cwe119}
+    # The unguarded register-indexed store in store_at() fires.
+    assert "store_at" in funcs, f"buffer write not flagged on aarch64: {cwe119}"
+    # The range-checked access in safe_store() must never fire (zero false positives).
+    assert "safe_store" not in funcs, (
+        f"the bounds-checked access in safe_store must not fire on aarch64: {cwe119}"
+    )
+    # The base+index register address (`add xD, xBase, xIdx`) is a genuinely
+    # data-dependent ("symbolic") offset -> high confidence, as on x86_64.
+    store_finding = next(f for f in cwe119 if f["function"] == "store_at")
+    assert store_finding["confidence"] == "high"
+
+
+def test_aarch64_runs_cwe119_under_all(require_angr, fixtures_dir):
+    # Under "all" on AArch64, CWE-119 now runs (it is no longer in the skipped
+    # set) and its findings surface alongside the call-site-driven checks.
+    rep = _analyze(fixtures_dir, "cwe119-aarch64-vuln", "all")
+    d = rep.to_dict()
+    assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
+    assert 119 not in d["skipped_checks"], (
+        f"CWE-119 should run on AArch64, but was skipped: {d['skipped_checks']}"
+    )
+    assert any(f["cwe"] == 119 for f in d["findings"]), (
+        f"expected CWE-119 findings under 'all' on aarch64: {d['findings']}"
+    )
+
+
 def test_aarch64_skips_register_level_checks(require_angr, fixtures_dir):
-    # On AArch64, the x86_64-only register-level checks (CWE-119/476/787)
+    # On AArch64, the remaining x86_64-only register-level checks (CWE-476/787)
     # are skipped rather than producing unsound results; the arch-agnostic
-    # checks — including the arch-aware CWE-732/190/134/415/416/369 — still run.
+    # checks — including the arch-aware CWE-119/732/190/134/415/416/369 — still run.
     rep = _analyze(fixtures_dir, "cwe78-aarch64-vuln", "all")
     d = rep.to_dict()
     assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
-    assert set(d["skipped_checks"]) == {119, 476, 787}
-    # CWE-732/190/134/415/416/369 are arch-aware and must NOT be skipped on AArch64.
+    assert set(d["skipped_checks"]) == {476, 787}
+    # CWE-119/732/190/134/415/416/369 are arch-aware and must NOT be skipped on AArch64.
+    assert 119 not in d["skipped_checks"]
     assert 732 not in d["skipped_checks"]
     assert 190 not in d["skipped_checks"]
     assert 134 not in d["skipped_checks"]

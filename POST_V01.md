@@ -133,10 +133,19 @@ x86_64 rodata-literal form (`lea reg, [rip+disp]`) and the AArch64 one
 non-literal/attacker-controlled format. Freestanding AArch64 fixtures
 (`tests/fixtures/cwe732-aarch64-vuln`, `tests/fixtures/cwe190-aarch64-vuln`,
 `tests/fixtures/cwe134-aarch64-vuln`) plus unit and slow tests lock all three
-behaviors. **Still skipped on AArch64:** the stack-slot/alias register-level
-checks (CWE-119/369/415/416/476/787), which rely on x86_64 `rbp`/`rsp`/`rdi`/
-`rax` spill conventions. Porting those (the slot-tracking abstraction the caveat
-below describes) is the remaining work for this item.
+behaviors. **CWE-369/415/416 are now arch-aware too** (divide-by-zero,
+double-free, use-after-free — see the per-check shipped notes), as is
+**CWE-119** (buffer over-read/write via an attacker-controlled index): the engine
+helper `AngrEngine.indexed_memory_access_without_bounds_check` recognizes the
+AArch64 codegen — the int index sign-extended with `ldrsw`/`sxtw`, the address
+formed with an explicit base+index sum (`add xD, xBase, xIdx`), the dereference
+through that base register (`str`/`ldr`/`strb`/`ldrb` over `[xD]`), and the
+bounds-check guard (`cmp`/`subs`/`tst`/`tbz`/`tbnz`/`cbz`/`cbnz` + `b.<cond>`) —
+alongside the x86_64 scaled-index-operand form, with a freestanding
+`tests/fixtures/cwe119-aarch64-vuln` fixture and unit + slow tests.
+**Still skipped on AArch64:** the remaining stack-slot/alias register-level
+checks (CWE-476/787), which rely on x86_64 `rbp`/`rsp`/`rdi`/`rax` spill
+conventions. Porting those is the remaining work for this item.
 
 **What it is:** Lift the v0.1 x86_64-only scope guard to also accept
 `aarch64`/`arm64` ELF binaries.
@@ -159,10 +168,10 @@ below describes) is the remaining work for this item.
   register and so needed arch-aware mnemonic/register recognition for AArch64 —
   now shipped via `size_arith_before_call`. CWE-732 and CWE-190 are the two
   register-level checks made arch-aware so far.)
-- Remaining Phase 2 scope: port the stack-slot/alias register-level checks
-  (CWE-119/369/415/416/476/787) — the slot-tracking abstraction below — to
-  AArch64; the call-site checks and the three arch-aware register-level checks
-  (CWE-732, CWE-190, CWE-134) already run there.
+- Remaining Phase 2 scope: port the last stack-slot/alias register-level checks
+  (CWE-476/787) to AArch64; the call-site checks and the arch-aware register-level
+  checks (CWE-732, CWE-190, CWE-134, CWE-369, CWE-415, CWE-416, CWE-119) already
+  run there.
 
 **Feasibility caveat:** Building AArch64 fixtures requires an AArch64 cross-compiler
 (`aarch64-linux-gnu-gcc`) or QEMU. Alfred's host is x86_64 — confirm toolchain

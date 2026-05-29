@@ -1,32 +1,44 @@
 """CWE-119: buffer over-read/write via an attacker-controlled offset.
 
 Strategy (whole-program): the danger pattern is a memory access whose *index*
-(not just base) is a tainted value. At -O0 this compiles to a scaled-index
-memory operand, e.g. ``mov byte ptr [rax+rdx], cl`` or
-``movsxd``/``cdqe`` of an input-derived index followed by a store/load into a
-buffer base. We detect a store or load that uses an index register which was
-derived from attacker input (via atoi/strtol/scanf/read), within a function
-reachable from the program input. The taint trace records the input source,
-the index computation, and the unchecked memory access (the sink).
+(not just base) is a tainted value. We detect a store or load that uses an
+index register which was derived from attacker input (via atoi/strtol/scanf/
+read), within a function reachable from the program input, and which is *not*
+guarded by a preceding bounds-check compare/branch. The taint trace records the
+input source, the index computation, and the unchecked memory access (the sink).
+
+Architecture-aware. The two architectures express the same source-level
+``buf[idx]`` access with different codegen at -O0:
+
+* **x86_64 (AMD64).** The int index is sign/zero-extended to 64 bits
+  (``movsxd``/``cdqe``/``movsx``/``movzx``) and folded into a scaled-index memory
+  operand, e.g. ``mov byte ptr [rax+rdx], cl`` (base register + index register).
+  The bounds check is a ``cmp`` followed by a conditional jump.
+
+* **AArch64 (ARM64).** The int index is sign-extended with ``ldrsw xN,
+  [slot]`` (load-and-sign-extend, the index reload) or ``sxtw xN, wM``, then the
+  address is computed with an explicit ``add xD, xBase, xIdx`` (base register +
+  index register) and dereferenced through that base register: ``str/ldr/strb/
+  ldrb wN, [xD]``. There is no single scaled-index operand as on x86_64 — the
+  scaling is materialized into ``xD``. The bounds check is a ``cmp``/``subs``/
+  ``tst``/``tbz``/``tbnz``/``cbz``/``cbnz`` followed by a conditional branch
+  (``b.<cond>``); a guarded access is the clean-baseline pattern and is skipped
+  to preserve the zero-false-positive posture.
+
+The arch-specific disassembly reasoning lives in the engine helper
+:meth:`AngrEngine.indexed_memory_access_without_bounds_check`, which returns the
+sink address, the access kind (read/write) and whether the offending access uses
+a genuinely data-dependent register index (the "symbolic" case -> high
+confidence, versus the static index-extension heuristic alone -> medium). The
+helper returns nothing on architectures other than AMD64/AARCH64, so this check
+is silent there.
 """
 
 from __future__ import annotations
 
-import re
-
 from autopsy.report import Finding, TaintPoint
 
 _SOURCES = {"atoi", "strtol", "atol", "scanf", "__isoc99_scanf", "read", "fgets", "gets"}
-# Index-register conversions that signal "this value is used as an index".
-_INDEX_EXT = {"movsxd", "cdqe", "movsx", "movzx"}
-# A scaled-index memory operand like [reg+reg], [reg+reg*N], or [base+reg].
-_SCALED_INDEX = re.compile(r"\[[a-z0-9]+\s*\+\s*[a-z0-9]+(?:\s*\*\s*[0-9]+)?\]")
-# A *symbolic* scaled index where the index component is itself a register
-# (register base + register index), i.e. a genuinely data-dependent offset:
-# [rax+rdx], [rax+rdx*4]. This is distinct from a static [reg+imm] form.
-_SYMBOLIC_INDEX = re.compile(r"\[[a-z][a-z0-9]*\s*\+\s*[a-z][a-z0-9]*(?:\s*\*\s*[0-9]+)?\]")
-# A store/load opcode family we care about.
-_MEM_OPS = {"mov", "movzx", "movsx"}
 
 
 def run(engine) -> list[Finding]:
@@ -41,7 +53,7 @@ def run(engine) -> list[Finding]:
     for func in cfg.kb.functions.values():
         if func.is_plt or func.is_simprocedure:
             continue
-        sink = _find_indexed_access(func)
+        sink = engine.indexed_memory_access_without_bounds_check(func)
         if sink is None:
             continue
         sink_addr, kind, symbolic_index = sink
@@ -74,53 +86,3 @@ def run(engine) -> list[Finding]:
         )
         # One finding per function is sufficient for v0.1.
     return findings
-
-
-def _find_indexed_access(func):
-    """Find a scaled-index store/load that is *not* preceded by a bounds-check
-    compare+branch in the same function.
-
-    Returns ``(addr, "write"|"read", symbolic_index)`` where ``symbolic_index``
-    is True when the offending memory operand uses a register index (a genuinely
-    data-dependent offset, e.g. ``[rax+rdx]``) rather than resting only on the
-    static index-extension heuristic.
-    """
-    insns = []
-    for block in func.blocks:
-        try:
-            insns.extend(block.capstone.insns)
-        except Exception:  # pragma: no cover - defensive
-            continue
-    insns.sort(key=lambda i: i.address)
-
-    saw_index_ext = False
-    saw_bounds_check = False
-    for insn in insns:
-        mn, ops = insn.mnemonic, insn.op_str
-        if mn in _INDEX_EXT:
-            saw_index_ext = True
-        # A cmp followed by a conditional jump is a (heuristic) bounds check.
-        if mn == "cmp":
-            saw_bounds_check = True
-        if mn not in _MEM_OPS:
-            continue
-        if not _SCALED_INDEX.search(ops):
-            continue
-        if not saw_index_ext:
-            # Require evidence the index came from a sign/zero-extended value
-            # (the signature of an int index promoted to 64-bit for addressing).
-            continue
-        if saw_bounds_check:
-            # A guarded access is the clean-baseline pattern; skip it.
-            return None
-        # Determine write vs read: write if the memory operand is the dest.
-        kind = "write" if ops.strip().startswith("[") or _dest_is_mem(ops) else "read"
-        symbolic_index = bool(_SYMBOLIC_INDEX.search(ops))
-        return (insn.address, kind, symbolic_index)
-    return None
-
-
-def _dest_is_mem(ops: str) -> bool:
-    # `mov [mem], reg` => first operand (dest) is memory.
-    first = ops.split(",", 1)[0].strip()
-    return first.startswith("[") or "ptr [" in first

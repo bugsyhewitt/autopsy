@@ -36,7 +36,7 @@ all: $(BINS) aarch64
 %: %.c
 	$(CC) $(ARCH) $(CFLAGS) -o $@ $<
 
-aarch64: cwe78-aarch64-vuln cwe732-aarch64-vuln cwe190-aarch64-vuln cwe134-aarch64-vuln cwe415-aarch64-vuln cwe416-aarch64-vuln cwe369-aarch64-vuln
+aarch64: cwe78-aarch64-vuln cwe732-aarch64-vuln cwe190-aarch64-vuln cwe134-aarch64-vuln cwe415-aarch64-vuln cwe416-aarch64-vuln cwe369-aarch64-vuln cwe119-aarch64-vuln
 
 cwe78-aarch64-vuln: cwe78-aarch64-vuln.c cwe78-aarch64-stubs.c
 	$(AARCH64_CC) $(AARCH64_TARGET) $(AARCH64_CFLAGS) -c cwe78-aarch64-vuln.c -o cwe78-aarch64-vuln.o
@@ -111,6 +111,19 @@ cwe369-aarch64-vuln: cwe369-aarch64-vuln.c cwe369-aarch64-stubs.c
 	$(AARCH64_LD) -o $@ cwe369-aarch64-vuln.o cwe369-aarch64-stubs.o -e _start --no-dynamic-linker
 	rm -f cwe369-aarch64-vuln.o cwe369-aarch64-stubs.o
 
+# AArch64 CWE-119 fixture: exercises the arch-aware register-level buffer
+# over-read/write check. The int index is sign-extended (`ldrsw x10, [sp, #N]`),
+# the buffer address is formed with an explicit base+index sum (`add x9, x9,
+# x10`), and the store dereferences that base register (`strb w8, [x9]`) with no
+# preceding bounds check. The safe companion range-checks the index
+# (`tbnz`/`subs` + `b.<cond>`) and must not fire. Same freestanding cross-build
+# recipe as the others.
+cwe119-aarch64-vuln: cwe119-aarch64-vuln.c cwe119-aarch64-stubs.c
+	$(AARCH64_CC) $(AARCH64_TARGET) $(AARCH64_CFLAGS) -c cwe119-aarch64-vuln.c -o cwe119-aarch64-vuln.o
+	$(AARCH64_CC) $(AARCH64_TARGET) $(AARCH64_CFLAGS) -c cwe119-aarch64-stubs.c -o cwe119-aarch64-stubs.o
+	$(AARCH64_LD) -o $@ cwe119-aarch64-vuln.o cwe119-aarch64-stubs.o -e _start --no-dynamic-linker
+	rm -f cwe119-aarch64-vuln.o cwe119-aarch64-stubs.o
+
 clean:
 	rm -f $(BINS) cwe78-aarch64-vuln cwe78-aarch64-vuln.o cwe78-aarch64-stubs.o \
 		cwe732-aarch64-vuln cwe732-aarch64-vuln.o cwe732-aarch64-stubs.o \
@@ -118,4 +131,5 @@ clean:
 		cwe134-aarch64-vuln cwe134-aarch64-vuln.o cwe134-aarch64-stubs.o \
 		cwe415-aarch64-vuln cwe415-aarch64-vuln.o cwe415-aarch64-stubs.o \
 		cwe416-aarch64-vuln cwe416-aarch64-vuln.o cwe416-aarch64-stubs.o \
-		cwe369-aarch64-vuln cwe369-aarch64-vuln.o cwe369-aarch64-stubs.o
+		cwe369-aarch64-vuln cwe369-aarch64-vuln.o cwe369-aarch64-stubs.o \
+		cwe119-aarch64-vuln cwe119-aarch64-vuln.o cwe119-aarch64-stubs.o
