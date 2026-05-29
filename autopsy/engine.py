@@ -105,10 +105,11 @@ class AngrEngine:
 
     # CWE checks whose detection is purely call-site-driven (call-graph + import
     # symbol resolution) and therefore architecture-agnostic. These run on any
-    # architecture in ``SUPPORTED_ARCHS``. CWE-676 (dangerous-function use) is
-    # call-site-driven like CWE-78/190 — it resolves direct calls by symbol name
-    # and never inspects registers, so it is sound on AArch64 too.
-    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 190, 676)
+    # architecture in ``SUPPORTED_ARCHS``. CWE-676 (dangerous-function use) and
+    # CWE-377 (insecure temporary file) are call-site-driven like CWE-78/190 —
+    # they resolve direct calls by symbol name and never inspect registers, so
+    # they are sound on AArch64 too.
+    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 190, 377, 676)
 
     def assert_supported(self) -> None:
         """Reject targets on architectures autopsy cannot analyze.

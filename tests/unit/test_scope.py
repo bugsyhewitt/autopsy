@@ -22,7 +22,8 @@ from autopsy.scope import (
         ("134", [134]),
         ("676", [676]),
         ("787", [787]),
-        ("all", [119, 190, 415, 416, 78, 134, 676, 787]),
+        ("377", [377]),
+        ("all", [119, 190, 377, 415, 416, 78, 134, 676, 787]),
     ],
 )
 def test_resolve_checks_valid_tokens(token, expected):
@@ -39,7 +40,7 @@ def test_unknown_token_raises():
 
 
 def test_valid_tokens_constant_complete():
-    assert set(VALID_TOKENS) == {"119", "190", "415", "416", "78", "134", "676", "787", "all"}
+    assert set(VALID_TOKENS) == {"119", "190", "377", "415", "416", "78", "134", "676", "787", "all"}
 
 
 # --- CWE catalog / list_checks --------------------------------------------
