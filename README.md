@@ -45,7 +45,7 @@ autopsy --version
 ## Usage
 
 ```
-autopsy --binary PATH [--checks {119,190,415,416,78,134,676,787,all}] [--max-states N]
+autopsy --binary PATH [--checks {119,190,377,415,416,78,134,676,787,all}] [--max-states N]
         [--format json|sarif] [--fail-on LEVEL] [--baseline PATH] [--write-baseline PATH]
 autopsy --list-checks [--format json]
 ```
@@ -170,8 +170,8 @@ never written from, nor applied to, a half-finished run.
 
 | Architecture | Checks that run |
 |---|---|
-| **x86_64 (AMD64)** | all checks (CWE-119, 190, 415, 416, 78, 134, 676, 787) |
-| **AArch64 (ARM64)** | the call-site-driven checks: **CWE-78**, **CWE-190** and **CWE-676** |
+| **x86_64 (AMD64)** | all checks (CWE-119, 190, 377, 415, 416, 78, 134, 676, 787) |
+| **AArch64 (ARM64)** | the call-site-driven checks: **CWE-78**, **CWE-190**, **CWE-377** and **CWE-676** |
 
 On an AArch64 target, the register-level checks (CWE-119/415/416/134/787) rely on
 x86_64 register conventions, so they are **skipped** rather than producing
@@ -185,9 +185,9 @@ autopsy --binary ./arm64-target --checks all
 
 ```json
 {
-  "checks": [119, 190, 415, 416, 78, 134, 676, 787],
+  "checks": [119, 190, 377, 415, 416, 78, 134, 676, 787],
   "skipped_checks": [119, 415, 416, 134, 787],
-  "findings": [ /* CWE-78 / CWE-190 / CWE-676 findings */ ]
+  "findings": [ /* CWE-78 / CWE-190 / CWE-377 / CWE-676 findings */ ]
 }
 ```
 
@@ -546,6 +546,46 @@ autopsy --binary tests/fixtures/cwe676-vuln --checks 676 --format json
   ],
   "evidence": "call to dangerous function gets() in main: no bounds check is possible; the call always risks overflow; prefer fgets",
   "confidence": "high"
+}
+```
+
+### CWE-377 — insecure temporary file
+
+A call to a libc temporary-file function whose contract is inherently
+race-prone: it generates a temporary *name* and hands it back without atomically
+creating the file, leaving a time-of-check-to-time-of-use (TOCTOU) window before
+the caller opens it. An attacker who wins that race can pre-create the path (often
+as a symlink) and hijack the file the program believes it created. The check
+flags `tmpnam`/`tmpnam_r`, `tempnam` and `mktemp`. Like CWE-676, CWE-377 needs no
+attacker-input source: the weakness is the *use of the race-prone function
+itself*, which is how MITRE classifies CWE-377.
+
+This is a **call-site-driven** detector — it resolves direct calls by symbol
+name and never inspects registers — so it is architecture-agnostic and runs on
+both x86_64 and AArch64.
+
+All four functions share the same structural race, so each carries
+`confidence: "medium"` — the call is a definitive use of a race-prone API, but
+autopsy does not prove the caller actually opens the returned path. The detector
+deliberately does **not** flag the atomic create-and-open replacements
+(`mkstemp`/`mkostemp`/`tmpfile`): those close the window and are the safe forms
+users are told to migrate to, which is what keeps the zero-false-positive line on
+the clean baseline.
+
+```bash
+autopsy --binary tests/fixtures/cwe377-vuln --checks 377 --format json
+```
+
+```json
+{
+  "cwe": 377,
+  "function": "make_temp",
+  "address": "0x401180",
+  "taint_trace": [
+    {"address": "0x401180", "description": "insecure temporary-file creation via tmpnam()"}
+  ],
+  "evidence": "call to insecure temporary-file function tmpnam() in make_temp: returns a temporary path without atomically creating the file, leaving a TOCTOU race before the caller opens it; prefer mkstemp",
+  "confidence": "medium"
 }
 ```
 

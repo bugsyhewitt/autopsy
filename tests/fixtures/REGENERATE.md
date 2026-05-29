@@ -15,6 +15,7 @@ run without a compiler. This file documents how to regenerate them if needed.
 | `cwe78-vuln.c` / `cwe78-vuln` | source + binary: OS command injection into `system()` |
 | `cwe134-vuln.c` / `cwe134-vuln` | source + binary: uncontrolled format string (`printf(user_input)`); the safe `log_line()` uses a literal format and must not be flagged |
 | `cwe676-vuln.c` / `cwe676-vuln` | source + binary: use of potentially dangerous functions (`gets`/`strcpy`/`sprintf`); the bounded siblings (`strncpy`/`snprintf`/`fgets`) must not be flagged |
+| `cwe377-vuln.c` / `cwe377-vuln` | source + binary: insecure temporary files (`tmpnam`/`mktemp`/`tempnam`); the atomic `mkstemp()` in `safe_create()` must not be flagged |
 | `cwe78-aarch64-vuln.c` + `cwe78-aarch64-stubs.c` / `cwe78-aarch64-vuln` | source + binary: **AArch64** OS command injection (exercises ARM64 support) |
 | `clean-baseline.c` / `clean-baseline` | source + binary: none of the four classes (zero-false-positive check) |
 | `Makefile` | build rules |
@@ -65,6 +66,14 @@ pytest -m slow
   from libc so the `gets` call site resolves for the detector. The linker prints
   a "the `gets' function is dangerous" warning during the build — that is
   expected and is exactly the weakness the CWE-676 check flags.
+- The `cwe377-vuln` fixture declares `tmpnam`/`tempnam`/`mktemp` explicitly
+  (`extern char *tmpnam(...)`, etc.) because they are obsolescent and may be
+  hidden behind feature guards; the symbols still link from libc so the call
+  sites resolve for the detector. The linker prints "the use of `tmpnam'/`mktemp'
+  /`tempnam' is dangerous" warnings during the build — those are expected and are
+  exactly the weakness the CWE-377 check flags. The `mkstemp()` call in
+  `safe_create()` is the atomic create-and-open replacement and must remain
+  unflagged (zero false positives).
 
 ## AArch64 (ARM64) fixture
 

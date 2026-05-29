@@ -181,6 +181,32 @@ def test_cwe676_detected(require_angr, fixtures_dir):
     assert gets_findings and gets_findings[0]["confidence"] == "high"
 
 
+def test_cwe377_detected(require_angr, fixtures_dir):
+    # Insecure temporary file: the fixture calls tmpnam(), mktemp() and
+    # tempnam(). The call-site-driven check must flag each, but must NOT flag the
+    # atomic mkstemp() in safe_create().
+    rep = _analyze(fixtures_dir, "cwe377-vuln", "377")
+    d = rep.to_dict()
+    assert d["error"] is None
+    cwe377 = [f for f in d["findings"] if f["cwe"] == 377]
+    assert cwe377, f"expected CWE-377 findings, got {d['findings']}"
+    for f in cwe377:
+        _assert_finding_contract(f, 377)
+    joined = " ".join(f["evidence"] for f in cwe377)
+    assert "tmpnam" in joined, f"tmpnam() not flagged: {cwe377}"
+    assert "mktemp" in joined, f"mktemp() not flagged: {cwe377}"
+    assert "tempnam" in joined, f"tempnam() not flagged: {cwe377}"
+    # The atomic replacement must never be flagged (zero false positives).
+    assert "mkstemp" not in " ".join(
+        f["evidence"].split(";")[0] for f in cwe377
+    ), f"mkstemp() must not be flagged as insecure: {cwe377}"
+    assert all(f["function"] != "safe_create" for f in cwe377), (
+        f"the mkstemp() call in safe_create must not fire: {cwe377}"
+    )
+    # All four temp-name functions report medium confidence.
+    assert all(f["confidence"] == "medium" for f in cwe377)
+
+
 def test_cwe78_detected_on_aarch64(require_angr, fixtures_dir):
     # AArch64 (ARM64) support: the call-site-driven CWE-78 check must fire on a
     # `bl` (branch-with-link) call to system() fed by an fgets() source, exactly
@@ -232,6 +258,7 @@ def test_max_states_high_completes_all_fixtures(require_angr, fixtures_dir):
     for name, cwe in [
         ("cwe119-vuln", 119),
         ("cwe190-vuln", 190),
+        ("cwe377-vuln", 377),
         ("cwe415-vuln", 415),
         ("cwe415-interproc-vuln", 415),
         ("cwe416-vuln", 416),
