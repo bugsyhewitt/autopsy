@@ -161,9 +161,20 @@ class AngrEngine:
     #     single-hop interprocedural companion pass remains x86_64-only and
     #     reports nothing on AArch64.)
     #
-    # The remaining register-level checks (CWE-119/476/787) still rely on
-    # x86_64 stack-slot/alias conventions and are skipped on AArch64.
-    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 134, 190, 338, 367, 369, 377, 415, 416, 676, 732)
+    #     CWE-119 (buffer over-read/write via an attacker-controlled index)
+    #     locates a scaled-index memory access whose register index is derived
+    #     from a sign/zero-extended int and that is not guarded by a preceding
+    #     bounds-check compare/branch;
+    #     ``indexed_memory_access_without_bounds_check`` knows both the x86_64
+    #     (scaled-index operand ``[base+index]`` preceded by ``movsxd``/``cdqe``;
+    #     guard via ``cmp``) and the AArch64 (``ldrsw``/``sxtw`` index extension,
+    #     ``add xD, xBase, xIdx`` base+index sum, deref ``[xD]``; guard via
+    #     ``cmp``/``subs``/``tst``/``tbz``/``tbnz``/``cbz``/``cbnz``) forms, so it
+    #     is sound on AArch64 too.
+    #
+    # The remaining register-level checks (CWE-476/787) still rely on x86_64
+    # stack-slot/alias conventions and are skipped on AArch64.
+    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 119, 134, 190, 338, 367, 369, 377, 415, 416, 676, 732)
 
     def assert_supported(self) -> None:
         """Reject targets on architectures autopsy cannot analyze.
@@ -172,9 +183,10 @@ class AngrEngine:
         arch-agnostic checks — the call-site-driven ones (CWE-78/338/367/377/
         676) and the arch-aware register-level checks (CWE-190 integer overflow,
         CWE-732 permission assignment, CWE-134 uncontrolled format string,
-        CWE-415 double-free, CWE-416 use-after-free, CWE-369 divide-by-zero);
-        the remaining register-level checks (CWE-119/476/787) use x86_64
-        register conventions and report no findings on AArch64 — see
+        CWE-415 double-free, CWE-416 use-after-free, CWE-369 divide-by-zero,
+        CWE-119 buffer over-read/write via an attacker-controlled index); the
+        remaining register-level checks (CWE-476/787) use x86_64 register
+        conventions and report no findings on AArch64 — see
         :meth:`checks_supported_on_arch`.
         """
         arch_name = self.project.arch.name
@@ -1565,6 +1577,194 @@ class AngrEngine:
             elif saw_compare_on_divisor and ins.mnemonic in cond_branches:
                 return True
         return False
+
+    # -- CWE-119 indexed-access discovery (arch-aware) --------------------
+
+    def indexed_memory_access_without_bounds_check(
+        self, func: Any
+    ) -> tuple[int, str, bool] | None:
+        """Find an unguarded scaled-index memory access in ``func``.
+
+        This is the engine half of the CWE-119 (buffer over-read/write via an
+        attacker-controlled index) heuristic. It looks for a store or load whose
+        *index* is a register-held value derived from a sign/zero-extended int
+        (the index-promotion idiom that signals ``arr[i]`` addressing), and which
+        is **not** preceded in the same function by a bounds-check compare/branch
+        (the clean ``if (i < 0 || i >= N) return;`` guard). Guarded accesses are
+        the clean-baseline pattern and are skipped to preserve the
+        zero-false-positive posture.
+
+        Returns ``(address, "write"|"read", symbolic_index)`` for the first such
+        access, or ``None``. ``symbolic_index`` is True when the offending access
+        uses a genuinely data-dependent *register* index (``[rax+rdx]`` on
+        x86_64, or an ``add xD, xBase, xIdx`` base+index computation on AArch64)
+        rather than resting only on the static index-extension heuristic; the
+        check maps that to "high" vs "medium" confidence.
+
+        Architecture-aware. On x86_64 the access is a ``mov``/``movzx``/``movsx``
+        with a scaled-index memory operand (``[base+index]``) preceded by a
+        ``movsxd``/``cdqe``/``movsx``/``movzx`` index extension, with a ``cmp``
+        as the bounds-check signal. On AArch64 the index is sign-extended with
+        ``ldrsw xN, [slot]`` (the int index reload) or ``sxtw xN, wM``, the
+        address is computed with ``add xD, xBase, xIdx`` (two registers), and the
+        dereference is ``str``/``ldr``/``strb``/``ldrb`` through ``[xD]``; the
+        bounds-check signal is ``cmp``/``subs``/``tst``/``tbz``/``tbnz``/``cbz``/
+        ``cbnz`` followed by a conditional branch. Returns ``None`` on any other
+        architecture, so the CWE-119 check is silent there.
+        """
+        arch = self.project.arch.name
+        if arch == "AMD64":
+            return self._indexed_access_amd64(func)
+        if arch == "AARCH64":
+            return self._indexed_access_aarch64(func)
+        return None
+
+    @staticmethod
+    def _func_insns_sorted(func: Any) -> list[Any]:
+        insns: list[Any] = []
+        for block in func.blocks:
+            try:
+                insns.extend(block.capstone.insns)
+            except Exception:  # pragma: no cover - defensive
+                continue
+        insns.sort(key=lambda i: i.address)
+        return insns
+
+    # x86_64 index-register conversions that signal "this value is used as an
+    # index" (an int promoted to 64-bit for addressing).
+    _INDEX_EXT_AMD64: frozenset[str] = frozenset({"movsxd", "cdqe", "movsx", "movzx"})
+    # A store/load opcode family we care about on x86_64.
+    _MEM_OPS_AMD64: frozenset[str] = frozenset({"mov", "movzx", "movsx"})
+
+    def _indexed_access_amd64(self, func: Any) -> tuple[int, str, bool] | None:
+        import re
+
+        # A scaled-index memory operand like [reg+reg], [reg+reg*N], [base+reg].
+        scaled_index = re.compile(r"\[[a-z0-9]+\s*\+\s*[a-z0-9]+(?:\s*\*\s*[0-9]+)?\]")
+        # A *symbolic* scaled index where the index component is itself a
+        # register (register base + register index): [rax+rdx], [rax+rdx*4]. This
+        # is distinct from a static [reg+imm] form.
+        symbolic_index_re = re.compile(
+            r"\[[a-z][a-z0-9]*\s*\+\s*[a-z][a-z0-9]*(?:\s*\*\s*[0-9]+)?\]"
+        )
+
+        insns = self._func_insns_sorted(func)
+        saw_index_ext = False
+        saw_bounds_check = False
+        for insn in insns:
+            mn, ops = insn.mnemonic, insn.op_str
+            if mn in self._INDEX_EXT_AMD64:
+                saw_index_ext = True
+            # A cmp (followed by a conditional jump) is a (heuristic) bounds check.
+            if mn == "cmp":
+                saw_bounds_check = True
+            if mn not in self._MEM_OPS_AMD64:
+                continue
+            if not scaled_index.search(ops):
+                continue
+            if not saw_index_ext:
+                # Require evidence the index came from a sign/zero-extended value
+                # (the signature of an int index promoted to 64-bit addressing).
+                continue
+            if saw_bounds_check:
+                # A guarded access is the clean-baseline pattern; skip it.
+                return None
+            # write if the memory operand is the dest.
+            kind = "write" if ops.strip().startswith("[") or self._amd64_dest_is_mem(ops) else "read"
+            symbolic_index = bool(symbolic_index_re.search(ops))
+            return (insn.address, kind, symbolic_index)
+        return None
+
+    @staticmethod
+    def _amd64_dest_is_mem(ops: str) -> bool:
+        # `mov [mem], reg` => first operand (dest) is memory.
+        first = ops.split(",", 1)[0].strip()
+        return first.startswith("[") or "ptr [" in first
+
+    # AArch64 sign/zero-extension forms that promote a 32-bit int index to a
+    # 64-bit address offset — the analogue of x86_64 ``movsxd``/``cdqe``. ``ldrsw``
+    # loads and sign-extends a 32-bit slot (the int-index reload at -O0); ``sxtw``
+    # sign-extends a w-register already in hand.
+    _INDEX_EXT_AARCH64: frozenset[str] = frozenset({"ldrsw", "sxtw"})
+    # AArch64 load/store mnemonics for a byte/half/word/dword access.
+    _MEM_OPS_AARCH64: frozenset[str] = frozenset({
+        "ldr", "ldrb", "ldrh", "ldrsb", "ldrsh", "ldur", "ldurb",
+        "str", "strb", "strh", "stur", "sturb",
+    })
+    # Bounds-check signal mnemonics on AArch64. A compare/test (cmp/subs/tst) is
+    # paired with a conditional branch; tbz/tbnz/cbz/cbnz are self-contained
+    # test-and-branch guards. Any of these before the access means it is guarded.
+    _BOUNDS_CHECK_AARCH64: frozenset[str] = frozenset({
+        "cmp", "subs", "tst", "tbz", "tbnz", "cbz", "cbnz",
+    })
+
+    def _indexed_access_aarch64(self, func: Any) -> tuple[int, str, bool] | None:
+        import re
+
+        # add xD, xBase, xIdx — a base+index address computation combining two
+        # distinct registers (the AArch64 way of forming arr+i at -O0). The
+        # x29/sp/wzr/xzr registers are stack/zero and not data-dependent indices.
+        add_reg_re = re.compile(r"^(x[0-9]+|w[0-9]+),\s*(x[0-9]+|w[0-9]+),\s*(x[0-9]+|w[0-9]+)\s*$")
+        # A dereference through a base register: `[xN]` / `[xN, #imm]`.
+        deref_base_re = re.compile(r"\[(x[0-9]+|sp|x29)")
+
+        insns = self._func_insns_sorted(func)
+
+        saw_index_ext = False
+        saw_bounds_check = False
+        # Registers currently holding a computed base+index address (symbolic).
+        index_addr_regs: set[str] = set()
+
+        for insn in insns:
+            mn, ops = insn.mnemonic, insn.op_str
+
+            if mn in self._INDEX_EXT_AARCH64:
+                saw_index_ext = True
+
+            if mn in self._BOUNDS_CHECK_AARCH64:
+                saw_bounds_check = True
+
+            # Track a base+index address computation into a destination register.
+            if mn == "add":
+                m = add_reg_re.match(ops)
+                if m:
+                    dst, src1, src2 = m.group(1), m.group(2), m.group(3)
+                    if src2 not in ("xzr", "wzr") and src1 not in ("xzr", "wzr"):
+                        index_addr_regs.add(dst)
+                        continue
+                # An add that redefines a tracked base reg with a non-index form
+                # invalidates it.
+                first = ops.split(",", 1)[0].strip()
+                index_addr_regs.discard(first)
+                continue
+
+            if mn not in self._MEM_OPS_AARCH64:
+                continue
+
+            # Determine the memory operand (the bracketed term) and its base.
+            base_m = deref_base_re.search(ops)
+            if not base_m:
+                continue
+            base_reg = base_m.group(1)
+
+            # The access is a candidate only if its base register was computed as
+            # a base+index sum (symbolic) OR we at least saw an index extension
+            # (the static heuristic) and the access reads/writes a buffer through
+            # a non-stack base register.
+            symbolic_index = base_reg in index_addr_regs
+            if not symbolic_index and not saw_index_ext:
+                continue
+            if not symbolic_index and base_reg in ("sp", "x29"):
+                # A plain stack-slot spill/reload with no index sum is not an
+                # indexed buffer access — skip to avoid false positives.
+                continue
+            if saw_bounds_check:
+                # A guarded access is the clean-baseline pattern; skip it.
+                return None
+
+            kind = "write" if mn.startswith("st") else "read"
+            return (insn.address, kind, symbolic_index)
+        return None
 
     # Allocators whose return value is NULL on failure and must be NULL-checked
     # before the returned pointer is dereferenced. ``malloc``/``calloc``/

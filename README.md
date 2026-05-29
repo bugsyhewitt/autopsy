@@ -17,8 +17,8 @@ design.
 
 > **Scope:** ELF only. Full check coverage on x86_64; the call-site-driven
 > checks (CWE-78/338/367/377/676) plus the arch-aware register-level checks
-> (CWE-732, CWE-190, CWE-134, CWE-415, CWE-369) also run on AArch64. See
-> [Architecture support](#architecture-support) and
+> (CWE-732, CWE-190, CWE-134, CWE-415, CWE-416, CWE-369, CWE-119) also run on
+> AArch64. See [Architecture support](#architecture-support) and
 > [What autopsy is not](#what-autopsy-is-not).
 
 ---
@@ -172,7 +172,7 @@ never written from, nor applied to, a half-finished run.
 | Architecture | Checks that run |
 |---|---|
 | **x86_64 (AMD64)** | all checks (CWE-119, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787) |
-| **AArch64 (ARM64)** | the call-site-driven checks (**CWE-78**, **CWE-338**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**, **CWE-134**, **CWE-415**, **CWE-416**, **CWE-369**) |
+| **AArch64 (ARM64)** | the call-site-driven checks (**CWE-78**, **CWE-338**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**, **CWE-134**, **CWE-415**, **CWE-416**, **CWE-369**, **CWE-119**) |
 
 On an AArch64 target, the **CWE-732** permission check runs natively: its register
 reasoning only reads a single mode/mask *immediate* out of the AAPCS64 argument
@@ -210,22 +210,32 @@ knows both the x86_64 form (`div`/`idiv` single divisor operand; guard via
 operand; guard via `cbz`/`cbnz` on the divisor, or `cmp`/`tst` + `b.<cond>`), so
 it runs on AArch64 too. (ARMv8 defines divide-by-zero as `0` rather than a trap,
 so the AArch64 consequence is a silently-wrong result an attacker can force, not
-a SIGFPE — but the unguarded divisor is still the weakness.) The remaining
-register-level checks (CWE-119/476/787) rely on x86_64 stack-slot/register
-conventions, so they are **skipped** rather than producing unsound results.
-Skipped checks are listed in the report's `skipped_checks` array and noted on
-stderr:
+a SIGFPE — but the unguarded divisor is still the weakness.) The **CWE-119**
+buffer over-read/write check is arch-aware as well: it locates a scaled-index
+memory access whose register index is derived from a sign/zero-extended int (the
+`arr[i]` index-promotion idiom) and that is **not** preceded by a bounds-check
+compare/branch, and the engine knows both the x86_64 form (a scaled-index memory
+operand `[base+index]` preceded by `movsxd`/`cdqe`; guard via `cmp` + a
+conditional jump) and the AArch64 one (the index sign-extended with
+`ldrsw x10, [sp, #N]` or `sxtw`, the address formed with an explicit base+index
+sum `add x9, x9, x10`, the dereference through that base register `strb w8, [x9]`;
+guard via `cmp`/`subs`/`tst`/`tbz`/`tbnz`/`cbz`/`cbnz` + `b.<cond>`), so it runs
+on AArch64 too (the `tests/fixtures/cwe119-aarch64-vuln` ARM64 fixture exercises
+it). The remaining register-level checks (CWE-476/787) rely on x86_64
+stack-slot/register conventions, so they are **skipped** rather than producing
+unsound results. Skipped checks are listed in the report's `skipped_checks`
+array and noted on stderr:
 
 ```bash
 autopsy --binary ./arm64-target --checks all
-# stderr: note: skipped CWE-119, CWE-476, CWE-787 (not supported on this target's architecture)
+# stderr: note: skipped CWE-476, CWE-787 (not supported on this target's architecture)
 ```
 
 ```json
 {
   "checks": [119, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787],
-  "skipped_checks": [119, 476, 787],
-  "findings": [ /* CWE-78 / 134 / 190 / 338 / 367 / 369 / 377 / 415 / 416 / 676 / 732 findings */ ]
+  "skipped_checks": [476, 787],
+  "findings": [ /* CWE-78 / 119 / 134 / 190 / 338 / 367 / 369 / 377 / 415 / 416 / 676 / 732 findings */ ]
 }
 ```
 
@@ -304,6 +314,18 @@ autopsy --binary tests/fixtures/cwe119-vuln --checks 119 --format json
   "confidence": "high"
 }
 ```
+
+> This is an **arch-aware register-level** detector: it locates a scaled-index
+> memory access whose register index is derived from a sign/zero-extended int
+> and that is not guarded by a preceding bounds-check compare/branch. The engine
+> knows both the x86_64 forms (a scaled-index operand `[base+index]` preceded by
+> `movsxd`/`cdqe`; guard via `cmp`) and the AArch64 forms (the index
+> sign-extended with `ldrsw`/`sxtw`, the address formed with an explicit
+> base+index sum `add xD, xBase, xIdx`, the dereference through `[xD]`; guard via
+> `cmp`/`subs`/`tst`/`tbz`/`tbnz`/`cbz`/`cbnz` + `b.<cond>`), so — like
+> CWE-732/190/134/415/416/369 — it runs on **both x86_64 and AArch64** (the
+> `tests/fixtures/cwe119-aarch64-vuln` ARM64 fixture exercises it). A
+> bounds-checked access is the clean-baseline pattern and is never flagged.
 
 ### CWE-190 — integer overflow into an allocator size
 

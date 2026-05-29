@@ -41,9 +41,10 @@ restriction means this is a structural match rather than a full data-flow
 proof.
 
 x86_64 only: the alias tracking relies on the SysV first-argument register
-(``rdi``) and -O0 stack-slot spill conventions, consistent with the
-register-level checks (CWE-119/415/416/787) that the engine already restricts
-to x86_64.
+(``rdi``) and -O0 stack-slot spill conventions. (The intra-procedural CWE-415
+and CWE-416 passes — and the CWE-119 indexed-access check — have since been made
+arch-aware and run on AArch64 too; this single-hop interprocedural companion
+pass remains x86_64-only and simply reports nothing on AArch64.)
 """
 
 from __future__ import annotations

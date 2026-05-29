@@ -26,6 +26,7 @@ run without a compiler. This file documents how to regenerate them if needed.
 | `cwe415-aarch64-vuln.c` + `cwe415-aarch64-stubs.c` / `cwe415-aarch64-vuln` | source + binary: **AArch64** intra-procedural double-free (exercises the arch-aware register-level CWE-415 check on ARM64); the single free in `safe_free()` must not be flagged |
 | `cwe416-aarch64-vuln.c` + `cwe416-aarch64-stubs.c` / `cwe416-aarch64-vuln` | source + binary: **AArch64** intra-procedural use-after-free (exercises the arch-aware register-level CWE-416 check on ARM64: free then dereference of the same pointer in `use_after_free()`); the freed-but-not-reused pointer in `safe_free()` must not be flagged |
 | `cwe369-aarch64-vuln.c` + `cwe369-aarch64-stubs.c` / `cwe369-aarch64-vuln` | source + binary: **AArch64** divide-by-zero (exercises the arch-aware CWE-369 check on ARM64: unguarded `sdiv`/`udiv` in `risky_ratio()`); the zero-checked `safe_ratio()` must not be flagged |
+| `cwe119-aarch64-vuln.c` + `cwe119-aarch64-stubs.c` / `cwe119-aarch64-vuln` | source + binary: **AArch64** buffer over-read/write via attacker-controlled index (exercises the arch-aware register-level CWE-119 check on ARM64: unguarded register-indexed store in `store_at()`); the range-checked `safe_store()` must not be flagged |
 | `clean-baseline.c` / `clean-baseline` | source + binary: none of the four classes (zero-false-positive check) |
 | `Makefile` | build rules |
 
@@ -229,6 +230,33 @@ You should see `sdiv w0, w8, w9` with no preceding `cbz`/`cbnz`/`cmp` on `w9` in
 `<risky_ratio>` (the unguarded divide), and a `cbnz w8, ...` guard before the
 `sdiv w8, w8, w9` in `<safe_ratio>` (the zero-check that must stay unflagged),
 with `bl ... <fgets>` and `bl ... <atoi>` in `<main>`.
+
+`cwe119-aarch64-vuln` exercises the **arch-aware register-level** CWE-119
+buffer over-read/write check on AArch64. At `-O0` a `buf[idx]` access lowers to:
+the int index is sign-extended (`ldrsw x10, [sp, #N]`), the buffer address is
+formed with an explicit base+index sum (`adr x9, <buf>` / `add x9, x9, x10`), and
+the store dereferences that base register (`strb w8, [x9]`). The register index
+makes the offset genuinely data-dependent ("symbolic") -> high confidence,
+mirroring the x86_64 symbolic scaled-index operand `[rax+rdx]`. The vulnerable
+`store_at()` does this with NO bounds check; the safe `safe_store()`
+range-checks the index first (`tbnz w8, #0x1f, ...` for `idx < 0` and
+`subs w8, w8, #0x10` / `b.lt ...` for `idx >= 16`) and must NOT fire. The check
+pairs the unguarded indexed access with the attacker-input source (`fgets`/`atoi`
+in `main`). Same freestanding cross-build recipe (stub libc in
+`cwe119-aarch64-stubs.c`). Keep the index coming from a function parameter so the
+compiler does not fold it to a constant, and keep `safe_store()`'s range check
+intact. Verify the codegen with:
+
+```bash
+llvm-objdump -d cwe119-aarch64-vuln | grep -A12 '<store_at>:'
+llvm-objdump -d cwe119-aarch64-vuln | grep -A22 '<safe_store>:'
+```
+
+You should see `ldrsw x10, [sp, #0xc]` / `add x9, x9, x10` / `strb w8, [x9]` with
+no preceding `cmp`/`subs`/`tbnz` in `<store_at>` (the unguarded indexed write),
+and a `tbnz`/`subs`+`b.lt` guard before the same `add`/`strb` sequence in
+`<safe_store>` (the bounds check that must stay unflagged), with
+`bl ... <fgets>` and `bl ... <atoi>` in `<main>`.
 
 Toolchain:
 
