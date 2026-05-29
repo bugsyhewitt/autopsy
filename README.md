@@ -170,8 +170,8 @@ never written from, nor applied to, a half-finished run.
 
 | Architecture | Checks that run |
 |---|---|
-| **x86_64 (AMD64)** | all checks (CWE-119, 190, 377, 415, 416, 78, 134, 676, 787) |
-| **AArch64 (ARM64)** | the call-site-driven checks: **CWE-78**, **CWE-190**, **CWE-377** and **CWE-676** |
+| **x86_64 (AMD64)** | all checks (CWE-119, 190, 338, 377, 415, 416, 78, 134, 676, 787) |
+| **AArch64 (ARM64)** | the call-site-driven checks: **CWE-78**, **CWE-190**, **CWE-338**, **CWE-377** and **CWE-676** |
 
 On an AArch64 target, the register-level checks (CWE-119/415/416/134/787) rely on
 x86_64 register conventions, so they are **skipped** rather than producing
@@ -185,9 +185,9 @@ autopsy --binary ./arm64-target --checks all
 
 ```json
 {
-  "checks": [119, 190, 377, 415, 416, 78, 134, 676, 787],
+  "checks": [119, 190, 338, 377, 415, 416, 78, 134, 676, 787],
   "skipped_checks": [119, 415, 416, 134, 787],
-  "findings": [ /* CWE-78 / CWE-190 / CWE-377 / CWE-676 findings */ ]
+  "findings": [ /* CWE-78 / CWE-190 / CWE-338 / CWE-377 / CWE-676 findings */ ]
 }
 ```
 
@@ -585,6 +585,50 @@ autopsy --binary tests/fixtures/cwe377-vuln --checks 377 --format json
     {"address": "0x401180", "description": "insecure temporary-file creation via tmpnam()"}
   ],
   "evidence": "call to insecure temporary-file function tmpnam() in make_temp: returns a temporary path without atomically creating the file, leaving a TOCTOU race before the caller opens it; prefer mkstemp",
+  "confidence": "medium"
+}
+```
+
+### CWE-338 — use of a cryptographically weak PRNG
+
+A call to a libc random-number function whose output is *not* cryptographically
+secure: a fast, statistically-uniform generator that is fully predictable to an
+attacker who recovers or guesses its seed. Deriving a token, session id, nonce,
+key, salt or password from such a generator is the weakness CWE-338 names. The
+check flags the C standard generators `rand`/`rand_r`/`random`/`random_r`, the
+BSD `drand48` family (`drand48`/`erand48`/`lrand48`/`nrand48`/`mrand48`/
+`jrand48`), and the seeders that pair with them (`srand`/`srandom`/`srand48`/
+`seed48`/`lcong48`) — seeding a weak PRNG, classically from `time(NULL)`, is the
+canonical CWE-338 instance. Like CWE-676 and CWE-377, CWE-338 needs no
+attacker-input source: the weakness is the *use of a non-CSPRNG itself*, which is
+how MITRE classifies CWE-338.
+
+This is a **call-site-driven** detector — it resolves direct calls by symbol
+name and never inspects registers — so it is architecture-agnostic and runs on
+both x86_64 and AArch64.
+
+Every weak generator is a definitive non-CSPRNG, so each carries
+`confidence: "medium"` — the call is a certain use of weak randomness, but
+autopsy cannot prove from the binary that the output feeds a security decision
+(a program may use `rand()` purely for a game or jitter). The detector
+deliberately does **not** flag the secure replacements (`getrandom`,
+`arc4random`/`arc4random_buf`/`arc4random_uniform`, or a read from
+`/dev/urandom`): those are the forms users are told to migrate to, which is what
+keeps the zero-false-positive line on the clean baseline.
+
+```bash
+autopsy --binary tests/fixtures/cwe338-vuln --checks 338 --format json
+```
+
+```json
+{
+  "cwe": 338,
+  "function": "weak_token",
+  "address": "0x4011b9",
+  "taint_trace": [
+    {"address": "0x4011b9", "description": "use of cryptographically weak PRNG rand()"}
+  ],
+  "evidence": "call to weak PRNG rand() in weak_token: rand() is a predictable non-cryptographic PRNG; its output can be reconstructed from the seed; prefer getrandom / arc4random",
   "confidence": "medium"
 }
 ```

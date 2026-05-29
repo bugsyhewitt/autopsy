@@ -207,6 +207,32 @@ def test_cwe377_detected(require_angr, fixtures_dir):
     assert all(f["confidence"] == "medium" for f in cwe377)
 
 
+def test_cwe338_detected(require_angr, fixtures_dir):
+    # Weak PRNG: the fixture seeds and draws from the predictable libc
+    # generators (srand/rand/drand48). The call-site-driven check must flag
+    # each, but must NOT flag the getrandom() CSPRNG used in secure_token().
+    rep = _analyze(fixtures_dir, "cwe338-vuln", "338")
+    d = rep.to_dict()
+    assert d["error"] is None
+    cwe338 = [f for f in d["findings"] if f["cwe"] == 338]
+    assert cwe338, f"expected CWE-338 findings, got {d['findings']}"
+    for f in cwe338:
+        _assert_finding_contract(f, 338)
+    joined = " ".join(f["evidence"] for f in cwe338)
+    assert "srand" in joined, f"srand() not flagged: {cwe338}"
+    assert "rand(" in joined, f"rand() not flagged: {cwe338}"
+    assert "drand48" in joined, f"drand48() not flagged: {cwe338}"
+    # The CSPRNG source must never be flagged (zero false positives).
+    assert "getrandom" not in " ".join(
+        f["evidence"].split(";")[0] for f in cwe338
+    ), f"getrandom() must not be flagged: {cwe338}"
+    assert all(f["function"] != "secure_token" for f in cwe338), (
+        f"the getrandom() call in secure_token must not fire: {cwe338}"
+    )
+    # Every weak-PRNG call reports medium confidence.
+    assert all(f["confidence"] == "medium" for f in cwe338)
+
+
 def test_cwe78_detected_on_aarch64(require_angr, fixtures_dir):
     # AArch64 (ARM64) support: the call-site-driven CWE-78 check must fire on a
     # `bl` (branch-with-link) call to system() fed by an fgets() source, exactly
@@ -258,6 +284,7 @@ def test_max_states_high_completes_all_fixtures(require_angr, fixtures_dir):
     for name, cwe in [
         ("cwe119-vuln", 119),
         ("cwe190-vuln", 190),
+        ("cwe338-vuln", 338),
         ("cwe377-vuln", 377),
         ("cwe415-vuln", 415),
         ("cwe415-interproc-vuln", 415),
