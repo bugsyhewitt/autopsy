@@ -116,6 +116,30 @@ def test_cwe416_interproc_detected(require_angr, fixtures_dir):
     assert "release" in interproc[0]["evidence"]
 
 
+def test_cwe476_detected(require_angr, fixtures_dir):
+    # NULL pointer dereference: risky_fill() dereferences a malloc() result with
+    # no NULL-check; safe_fill() (if (p == NULL) return) and safe_env() (getenv
+    # checked) guard their pointers and must NOT fire.
+    rep = _analyze(fixtures_dir, "cwe476-vuln", "476")
+    d = rep.to_dict()
+    assert d["error"] is None
+    cwe476 = [f for f in d["findings"] if f["cwe"] == 476]
+    assert cwe476, f"expected a CWE-476 finding, got {d['findings']}"
+    vuln = [f for f in cwe476 if f["function"] == "risky_fill"]
+    assert vuln, f"expected the unchecked deref in risky_fill(), got {cwe476}"
+    _assert_finding_contract(vuln[0], 476)
+    # The NULL-checked allocations must never be flagged (zero false positives).
+    assert all(f["function"] != "safe_fill" for f in cwe476), (
+        f"the NULL-checked malloc in safe_fill must not fire: {cwe476}"
+    )
+    assert all(f["function"] != "safe_env" for f in cwe476), (
+        f"the NULL-checked getenv in safe_env must not fire: {cwe476}"
+    )
+    # Unchecked allocator-result dereference -> medium confidence.
+    assert vuln[0]["confidence"] == "medium"
+    assert "malloc" in vuln[0]["evidence"]
+
+
 def test_cwe78_detected(require_angr, fixtures_dir):
     rep = _analyze(fixtures_dir, "cwe78-vuln", "78")
     d = rep.to_dict()
@@ -331,7 +355,7 @@ def test_aarch64_skips_register_level_checks(require_angr, fixtures_dir):
     rep = _analyze(fixtures_dir, "cwe78-aarch64-vuln", "all")
     d = rep.to_dict()
     assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
-    assert set(d["skipped_checks"]) == {119, 369, 415, 416, 134, 732, 787}
+    assert set(d["skipped_checks"]) == {119, 369, 415, 416, 476, 134, 732, 787}
     # The CWE-78 finding still surfaces under "all".
     assert any(f["cwe"] == 78 for f in d["findings"])
 
@@ -370,6 +394,7 @@ def test_max_states_high_completes_all_fixtures(require_angr, fixtures_dir):
         ("cwe415-interproc-vuln", 415),
         ("cwe416-vuln", 416),
         ("cwe416-interproc-vuln", 416),
+        ("cwe476-vuln", 476),
         ("cwe78-vuln", 78),
         ("cwe134-vuln", 134),
         ("cwe676-vuln", 676),
