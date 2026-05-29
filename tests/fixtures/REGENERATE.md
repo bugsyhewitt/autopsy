@@ -14,6 +14,7 @@ run without a compiler. This file documents how to regenerate them if needed.
 | `cwe416-interproc-vuln.c` / `cwe416-interproc-vuln` | source + binary: single-hop **interprocedural** use-after-free (free in callee, use in caller) |
 | `cwe78-vuln.c` / `cwe78-vuln` | source + binary: OS command injection into `system()` |
 | `cwe134-vuln.c` / `cwe134-vuln` | source + binary: uncontrolled format string (`printf(user_input)`); the safe `log_line()` uses a literal format and must not be flagged |
+| `cwe676-vuln.c` / `cwe676-vuln` | source + binary: use of potentially dangerous functions (`gets`/`strcpy`/`sprintf`); the bounded siblings (`strncpy`/`snprintf`/`fgets`) must not be flagged |
 | `cwe78-aarch64-vuln.c` + `cwe78-aarch64-stubs.c` / `cwe78-aarch64-vuln` | source + binary: **AArch64** OS command injection (exercises ARM64 support) |
 | `clean-baseline.c` / `clean-baseline` | source + binary: none of the four classes (zero-false-positive check) |
 | `Makefile` | build rules |
@@ -59,6 +60,11 @@ pytest -m slow
   `cwe416-interproc-vuln` fixture **must remain single-hop interprocedural**
   (the pointer is freed inside a callee that receives it as an argument, then
   dereferenced in the caller after that call returns, with no intervening call).
+- The `cwe676-vuln` fixture declares `gets` explicitly (`extern char *gets(...)`)
+  because modern glibc/C11 headers no longer expose it; the symbol still links
+  from libc so the `gets` call site resolves for the detector. The linker prints
+  a "the `gets' function is dangerous" warning during the build — that is
+  expected and is exactly the weakness the CWE-676 check flags.
 
 ## AArch64 (ARM64) fixture
 

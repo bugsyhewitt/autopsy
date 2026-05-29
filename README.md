@@ -45,7 +45,7 @@ autopsy --version
 ## Usage
 
 ```
-autopsy --binary PATH [--checks {119,190,415,416,78,134,787,all}] [--max-states N]
+autopsy --binary PATH [--checks {119,190,415,416,78,134,676,787,all}] [--max-states N]
         [--format json|sarif] [--fail-on LEVEL] [--baseline PATH] [--write-baseline PATH]
 autopsy --list-checks [--format json]
 ```
@@ -170,8 +170,8 @@ never written from, nor applied to, a half-finished run.
 
 | Architecture | Checks that run |
 |---|---|
-| **x86_64 (AMD64)** | all checks (CWE-119, 190, 415, 416, 78, 134, 787) |
-| **AArch64 (ARM64)** | the call-site-driven checks: **CWE-78** and **CWE-190** |
+| **x86_64 (AMD64)** | all checks (CWE-119, 190, 415, 416, 78, 134, 676, 787) |
+| **AArch64 (ARM64)** | the call-site-driven checks: **CWE-78**, **CWE-190** and **CWE-676** |
 
 On an AArch64 target, the register-level checks (CWE-119/415/416/134/787) rely on
 x86_64 register conventions, so they are **skipped** rather than producing
@@ -185,9 +185,9 @@ autopsy --binary ./arm64-target --checks all
 
 ```json
 {
-  "checks": [119, 190, 415, 416, 78, 134, 787],
+  "checks": [119, 190, 415, 416, 78, 134, 676, 787],
   "skipped_checks": [119, 415, 416, 134, 787],
-  "findings": [ /* CWE-78 / CWE-190 findings */ ]
+  "findings": [ /* CWE-78 / CWE-190 / CWE-676 findings */ ]
 }
 ```
 
@@ -508,6 +508,46 @@ autopsy --binary tests/fixtures/cwe787-vuln --checks 787 --format json
 > The CWE-787 check uses x86_64 SysV register/stack-slot conventions (the copy
 > length argument is in `rdx`) and runs on x86_64 (AMD64) targets only; on
 > AArch64 the register-level checks are skipped.
+
+### CWE-676 — use of a potentially dangerous function
+
+A call to a libc function that is inherently unsafe — one whose contract makes a
+memory-safety bug the *default* outcome rather than a misuse. The canonical
+example is `gets()`, which has no way to bound its write and was removed from
+C11 for exactly that reason. The check flags the unbounded string family
+(`strcpy`/`strcat`/`sprintf`/`vsprintf`) and the unbounded scanners
+(`scanf`/`sscanf`/`fscanf`, including the glibc `__isoc99_*` aliases). Unlike
+the taint-flow checks, CWE-676 needs no attacker-input source: the weakness is
+the *use of the function itself*, which is how MITRE classifies CWE-676.
+
+This is a **call-site-driven** detector — it resolves direct calls by symbol
+name and never inspects registers — so it is architecture-agnostic and runs on
+both x86_64 and AArch64.
+
+`gets()` admits no safe usage at all, so a finding on it is `confidence: "high"`.
+The others can in principle be used safely if the caller has already bounded
+the input, so they carry `confidence: "medium"` — the call is a strong
+structural red flag, not a proof of overflow. The detector deliberately does
+**not** flag the bounded replacements (`strncpy`/`strncat`/`snprintf`/`fgets`/
+`strlcpy`): those are the safe forms users are told to migrate to, which is what
+keeps the zero-false-positive line on the clean baseline.
+
+```bash
+autopsy --binary tests/fixtures/cwe676-vuln --checks 676 --format json
+```
+
+```json
+{
+  "cwe": 676,
+  "function": "main",
+  "address": "0x401170",
+  "taint_trace": [
+    {"address": "0x401170", "description": "use of potentially dangerous function gets()"}
+  ],
+  "evidence": "call to dangerous function gets() in main: no bounds check is possible; the call always risks overflow; prefer fgets",
+  "confidence": "high"
+}
+```
 
 ---
 
