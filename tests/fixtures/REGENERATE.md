@@ -24,6 +24,7 @@ run without a compiler. This file documents how to regenerate them if needed.
 | `cwe190-aarch64-vuln.c` + `cwe190-aarch64-stubs.c` / `cwe190-aarch64-vuln` | source + binary: **AArch64** integer overflow into allocator size (exercises the arch-aware register-level CWE-190 check on ARM64) |
 | `cwe134-aarch64-vuln.c` + `cwe134-aarch64-stubs.c` / `cwe134-aarch64-vuln` | source + binary: **AArch64** uncontrolled format string (exercises the arch-aware register-level CWE-134 check on ARM64) |
 | `cwe415-aarch64-vuln.c` + `cwe415-aarch64-stubs.c` / `cwe415-aarch64-vuln` | source + binary: **AArch64** intra-procedural double-free (exercises the arch-aware register-level CWE-415 check on ARM64); the single free in `safe_free()` must not be flagged |
+| `cwe369-aarch64-vuln.c` + `cwe369-aarch64-stubs.c` / `cwe369-aarch64-vuln` | source + binary: **AArch64** divide-by-zero (exercises the arch-aware CWE-369 check on ARM64: unguarded `sdiv`/`udiv` in `risky_ratio()`); the zero-checked `safe_ratio()` must not be flagged |
 | `clean-baseline.c` / `clean-baseline` | source + binary: none of the four classes (zero-false-positive check) |
 | `Makefile` | build rules |
 
@@ -178,6 +179,30 @@ llvm-objdump -d cwe415-aarch64-vuln | grep -A12 '<safe_free>:'
 You should see `str x0, [sp, #0x8]` then two `ldr x0, [sp, #0x8]` / `bl <free>`
 pairs in `<double_free>` (the double-free), and a single `ldr x0, [sp, #0x8]` /
 `bl <free>` in `<safe_free>` (the safe single free that must stay unflagged).
+
+`cwe369-aarch64-vuln` exercises the **arch-aware** CWE-369 divide-by-zero check
+on AArch64: the divisor is the *third* operand of `sdiv`/`udiv`
+(`sdiv Wd, Wn, Wm` -> `Wm`). An unguarded division — no `cbz`/`cbnz` on the
+divisor and no `cmp`/`tst` + `b.<cond>` before it — co-located with an
+attacker-input source (`fgets`/`atoi`) is the CWE-369 site (`risky_ratio()`,
+medium confidence). The safe companion `safe_ratio()` zero-checks the divisor
+(at `-O0` clang emits `cbnz` on a sibling register reloaded from the divisor's
+stack slot) and must NOT fire. ARMv8 defines integer divide-by-zero as producing
+`0` (it does **not** trap like x86_64's `#DE`/SIGFPE), so on AArch64 the
+weakness is a silently-wrong result an attacker can force rather than a crash —
+but the missing zero-check is still the bug, and autopsy flags it identically.
+Same freestanding cross-build recipe (stub libc in `cwe369-aarch64-stubs.c`).
+Verify the codegen with:
+
+```bash
+llvm-objdump -d cwe369-aarch64-vuln | grep -A8 '<risky_ratio>:'
+llvm-objdump -d cwe369-aarch64-vuln | grep -A18 '<safe_ratio>:'
+```
+
+You should see `sdiv w0, w8, w9` with no preceding `cbz`/`cbnz`/`cmp` on `w9` in
+`<risky_ratio>` (the unguarded divide), and a `cbnz w8, ...` guard before the
+`sdiv w8, w8, w9` in `<safe_ratio>` (the zero-check that must stay unflagged),
+with `bl ... <fgets>` and `bl ... <atoi>` in `<main>`.
 
 Toolchain:
 

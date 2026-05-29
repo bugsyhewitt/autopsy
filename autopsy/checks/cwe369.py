@@ -1,22 +1,28 @@
 """CWE-369: Divide By Zero.
 
-Strategy (whole-program, register-level): locate every ``div``/``idiv``
+Strategy (whole-program, register-level): locate every integer-division
 instruction whose divisor is *not* guarded by a preceding zero-check, and report
 it when the program also reads attacker-controlled input. On x86_64, ``div`` and
 ``idiv`` take a single explicit operand — the divisor — which is always a
 register or memory location (there is no immediate divisor form). When that
 divisor evaluates to zero the CPU raises a divide-error exception (#DE), which
-the kernel delivers as ``SIGFPE`` and crashes the process. If an attacker can
-drive the divisor to zero (the classic ``x / atoi(user_input)`` with no
-``if (d == 0)`` check), that is the denial-of-service weakness CWE-369 names.
+the kernel delivers as ``SIGFPE`` and crashes the process. On AArch64, ``sdiv``
+and ``udiv`` take the divisor as the *third* operand (``sdiv Wd, Wn, Wm`` →
+``Wm``); ARMv8 does not trap on integer divide-by-zero — the result is defined
+as 0 — so the AArch64 consequence is a silently-wrong result an attacker can
+force rather than a crash. Either way, if an attacker can drive the divisor to
+zero (the classic ``x / atoi(user_input)`` with no ``if (d == 0)`` check), that
+unguarded division is the weakness CWE-369 names.
 
 The engine helper :meth:`AngrEngine.divisions_with_unguarded_divisor` does the
 disassembly-level work: it walks each function, finds the division instructions,
-and excludes any whose divisor register is the subject of a ``cmp``/``test``
-followed by a conditional branch before the divide — i.e. a guard like
-``if (d == 0) return;``. Excluding guarded sites is what preserves autopsy's
-zero-false-positive posture on well-written code: a program that checks its
-divisor before dividing is not vulnerable and must not be flagged.
+and excludes any whose divisor register is the subject of a zero-check before
+the divide — on x86_64 a ``cmp``/``test`` followed by a conditional jump, on
+AArch64 a ``cbz``/``cbnz`` or a ``cmp``/``tst`` followed by a ``b.<cond>``
+branch — i.e. a guard like ``if (d == 0) return;``. Excluding guarded sites is
+what preserves autopsy's zero-false-positive posture on well-written code: a
+program that checks its divisor before dividing is not vulnerable and must not
+be flagged.
 
 Like CWE-78/134/190, this check requires an attacker-controlled input source to
 be present in the binary (``fgets``/``scanf``/``read``/``atoi``/``strtol`` …).
@@ -26,10 +32,9 @@ finding is reported at ``medium`` confidence: an unguarded divisor co-located
 with an input source is a strong structural signal, but the check does not prove
 a register-level def-use chain from the specific input read to the divisor.
 
-x86_64 only: the divisor-register reasoning relies on x86_64 disassembly. The
-engine returns an empty list on other architectures, so on AArch64 this check
-yields no findings (it is excluded from the architecture-agnostic set and
-skipped upstream).
+x86_64 (AMD64) and AArch64 (ARM64): the divisor/guard reasoning is arch-aware
+(see :meth:`AngrEngine.divisions_with_unguarded_divisor`). The engine returns an
+empty list on any other architecture, so this check is silent there.
 """
 
 from __future__ import annotations
@@ -75,7 +80,8 @@ def run(engine) -> list[Finding]:
         evidence = (
             f"unguarded integer division (divisor {div['divisor']}) in "
             f"{div['function']} with no zero-check; attacker input via "
-            f"{src.target_name}() can drive the divisor to zero (SIGFPE)"
+            f"{src.target_name}() can drive the divisor to zero "
+            f"(SIGFPE on x86_64; a silently-wrong 0 result on AArch64)"
         )
         trace = [
             TaintPoint(

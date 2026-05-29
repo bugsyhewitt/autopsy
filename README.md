@@ -17,7 +17,7 @@ design.
 
 > **Scope:** ELF only. Full check coverage on x86_64; the call-site-driven
 > checks (CWE-78/338/367/377/676) plus the arch-aware register-level checks
-> (CWE-732, CWE-190, CWE-134, CWE-415) also run on AArch64. See
+> (CWE-732, CWE-190, CWE-134, CWE-415, CWE-369) also run on AArch64. See
 > [Architecture support](#architecture-support) and
 > [What autopsy is not](#what-autopsy-is-not).
 
@@ -172,7 +172,7 @@ never written from, nor applied to, a half-finished run.
 | Architecture | Checks that run |
 |---|---|
 | **x86_64 (AMD64)** | all checks (CWE-119, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787) |
-| **AArch64 (ARM64)** | the call-site-driven checks (**CWE-78**, **CWE-338**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**, **CWE-134**, **CWE-415**) |
+| **AArch64 (ARM64)** | the call-site-driven checks (**CWE-78**, **CWE-338**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**, **CWE-134**, **CWE-415**, **CWE-369**) |
 
 On an AArch64 target, the **CWE-732** permission check runs natively: its register
 reasoning only reads a single mode/mask *immediate* out of the AAPCS64 argument
@@ -195,21 +195,29 @@ calls, and the scanner knows both the x86_64 form (`rax`/`rdi`; `mov` slot
 store/reload over `[rbp-N]`/`[rsp-N]`) and the AArch64 one (`x0`; `str`/`ldr`
 over `[sp,#N]`/`[x29,#N]`), so it runs on AArch64 too. (Its single-hop
 interprocedural companion pass remains x86_64-only and simply reports nothing on
-AArch64.) The remaining register-level checks (CWE-119/369/416/476/787) rely on
-x86_64 stack-slot/register conventions, so they are **skipped** rather than
-producing unsound results. Skipped checks are listed in the report's
-`skipped_checks` array and noted on stderr:
+AArch64.) The **CWE-369** divide-by-zero check is arch-aware as well: it locates
+a division whose divisor is not guarded by a preceding zero-check, and the engine
+knows both the x86_64 form (`div`/`idiv` single divisor operand; guard via
+`cmp`/`test` + a conditional jump) and the AArch64 one (`sdiv`/`udiv` third
+operand; guard via `cbz`/`cbnz` on the divisor, or `cmp`/`tst` + `b.<cond>`), so
+it runs on AArch64 too. (ARMv8 defines divide-by-zero as `0` rather than a trap,
+so the AArch64 consequence is a silently-wrong result an attacker can force, not
+a SIGFPE — but the unguarded divisor is still the weakness.) The remaining
+register-level checks (CWE-119/416/476/787) rely on x86_64 stack-slot/register
+conventions, so they are **skipped** rather than producing unsound results.
+Skipped checks are listed in the report's `skipped_checks` array and noted on
+stderr:
 
 ```bash
 autopsy --binary ./arm64-target --checks all
-# stderr: note: skipped CWE-119, CWE-369, CWE-416, CWE-476, CWE-787 (not supported on this target's architecture)
+# stderr: note: skipped CWE-119, CWE-416, CWE-476, CWE-787 (not supported on this target's architecture)
 ```
 
 ```json
 {
   "checks": [119, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787],
-  "skipped_checks": [119, 369, 416, 476, 787],
-  "findings": [ /* CWE-78 / 134 / 190 / 338 / 367 / 377 / 415 / 676 / 732 findings */ ]
+  "skipped_checks": [119, 416, 476, 787],
+  "findings": [ /* CWE-78 / 134 / 190 / 338 / 367 / 369 / 377 / 415 / 676 / 732 findings */ ]
 }
 ```
 
@@ -692,30 +700,39 @@ autopsy --binary tests/fixtures/cwe338-vuln --checks 338 --format json
 
 ### CWE-369 — divide by zero
 
-An integer division (`div`/`idiv`) whose divisor is **not** guarded by a
-zero-check, in a program that reads attacker-controlled input. On x86_64 `div`
-and `idiv` take a single explicit operand — the divisor — and the CPU raises a
-divide-error exception (#DE, delivered as `SIGFPE`) when it is zero. If an
-attacker can drive that divisor to zero — the classic `x / atoi(user_input)`
-with no `if (d == 0)` check — the process crashes: the denial-of-service
-weakness CWE-369 names.
+An integer division whose divisor is **not** guarded by a zero-check, in a
+program that reads attacker-controlled input. On x86_64 `div` and `idiv` take a
+single explicit operand — the divisor — and the CPU raises a divide-error
+exception (#DE, delivered as `SIGFPE`) when it is zero, crashing the process. On
+AArch64 the divisor is the *third* operand of `sdiv`/`udiv`
+(`sdiv Wd, Wn, Wm` → `Wm`); ARMv8 defines integer divide-by-zero as producing
+`0` (it does **not** trap), so the AArch64 consequence is a silently-wrong `0`
+result an attacker can force rather than a crash. Either way, if an attacker can
+drive the divisor to zero — the classic `x / atoi(user_input)` with no
+`if (d == 0)` check — that unguarded division is the weakness CWE-369 names.
 
 The check walks each function for division instructions and **excludes** any
-whose divisor register is the subject of a preceding `cmp`/`test` followed by a
-conditional branch — i.e. a guard like `if (d == 0) return;`. Excluding guarded
-divisions is what holds the zero-false-positive line: a program that checks its
-divisor is not vulnerable and is never flagged (the `safe_ratio` companion in
-the fixture is silent). An attacker-controlled input source
-(`fgets`/`scanf`/`read`/`atoi`/`strtol`…) must also be present — a divisor the
-program never sourced from input cannot be driven to zero by an attacker.
+whose divisor is the subject of a preceding zero-check — on x86_64 a `cmp`/`test`
+followed by a conditional jump, on AArch64 a `cbz`/`cbnz` on the divisor or a
+`cmp`/`tst` followed by a `b.<cond>` branch — i.e. a guard like
+`if (d == 0) return;`. (At `-O0` the AArch64 guard often tests a sibling register
+reloaded from the divisor's stack slot; the check tracks the slot so that still
+counts as a guard.) Excluding guarded divisions is what holds the
+zero-false-positive line: a program that checks its divisor is not vulnerable and
+is never flagged (the `safe_ratio` companion in the fixtures is silent). An
+attacker-controlled input source (`fgets`/`scanf`/`read`/`atoi`/`strtol`…) must
+also be present — a divisor the program never sourced from input cannot be driven
+to zero by an attacker.
 
 Findings carry `confidence: "medium"`: an unguarded divisor co-located with an
 input source is a strong structural signal, but the check does not prove a
 register-level def-use chain from the specific read to the divisor.
 
-This is a **register-level** detector (it inspects the divisor operand and the
-x86_64 guard instructions), so it runs on **x86_64 only** and is skipped on
-AArch64.
+This is an **arch-aware register-level** detector: the engine knows both the
+x86_64 (`div`/`idiv`) and AArch64 (`sdiv`/`udiv`) divisor/guard forms, so — like
+CWE-732, CWE-190, CWE-134 and CWE-415 — it runs on **both x86_64 and AArch64**
+(the `tests/fixtures/cwe369-aarch64-vuln` ARM64 fixture exercises it). It is
+*not* skipped on AArch64.
 
 ```bash
 autopsy --binary tests/fixtures/cwe369-vuln --checks 369 --format json
@@ -730,7 +747,7 @@ autopsy --binary tests/fixtures/cwe369-vuln --checks 369 --format json
     {"address": "0x401199", "description": "attacker-controlled value introduced via atoi()"},
     {"address": "0x401154", "description": "division with unguarded divisor dword ptr [rbp - 8] (no zero-check)"}
   ],
-  "evidence": "unguarded integer division (divisor dword ptr [rbp - 8]) in risky_ratio with no zero-check; attacker input via atoi() can drive the divisor to zero (SIGFPE)",
+  "evidence": "unguarded integer division (divisor dword ptr [rbp - 8]) in risky_ratio with no zero-check; attacker input via atoi() can drive the divisor to zero (SIGFPE on x86_64; a silently-wrong 0 result on AArch64)",
   "confidence": "medium"
 }
 ```

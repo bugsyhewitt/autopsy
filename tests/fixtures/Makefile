@@ -36,7 +36,7 @@ all: $(BINS) aarch64
 %: %.c
 	$(CC) $(ARCH) $(CFLAGS) -o $@ $<
 
-aarch64: cwe78-aarch64-vuln cwe732-aarch64-vuln cwe190-aarch64-vuln cwe134-aarch64-vuln cwe415-aarch64-vuln
+aarch64: cwe78-aarch64-vuln cwe732-aarch64-vuln cwe190-aarch64-vuln cwe134-aarch64-vuln cwe415-aarch64-vuln cwe369-aarch64-vuln
 
 cwe78-aarch64-vuln: cwe78-aarch64-vuln.c cwe78-aarch64-stubs.c
 	$(AARCH64_CC) $(AARCH64_TARGET) $(AARCH64_CFLAGS) -c cwe78-aarch64-vuln.c -o cwe78-aarch64-vuln.o
@@ -86,9 +86,22 @@ cwe415-aarch64-vuln: cwe415-aarch64-vuln.c cwe415-aarch64-stubs.c
 	$(AARCH64_LD) -o $@ cwe415-aarch64-vuln.o cwe415-aarch64-stubs.o -e _start --no-dynamic-linker
 	rm -f cwe415-aarch64-vuln.o cwe415-aarch64-stubs.o
 
+# AArch64 CWE-369 fixture: exercises the arch-aware divide-by-zero check. The
+# divisor is the third operand of `sdiv`/`udiv` (`sdiv Wd, Wn, Wm` -> Wm); an
+# unguarded division (no `cbz`/`cbnz` on the divisor and no `cmp`/`tst` +
+# `b.<cond>` before it) co-located with an input source (`fgets`/`atoi`) is the
+# CWE-369 site. The safe companion guards the divisor (`cbnz`/`cmp`) and must
+# not fire. Same freestanding cross-build recipe as the others.
+cwe369-aarch64-vuln: cwe369-aarch64-vuln.c cwe369-aarch64-stubs.c
+	$(AARCH64_CC) $(AARCH64_TARGET) $(AARCH64_CFLAGS) -c cwe369-aarch64-vuln.c -o cwe369-aarch64-vuln.o
+	$(AARCH64_CC) $(AARCH64_TARGET) $(AARCH64_CFLAGS) -c cwe369-aarch64-stubs.c -o cwe369-aarch64-stubs.o
+	$(AARCH64_LD) -o $@ cwe369-aarch64-vuln.o cwe369-aarch64-stubs.o -e _start --no-dynamic-linker
+	rm -f cwe369-aarch64-vuln.o cwe369-aarch64-stubs.o
+
 clean:
 	rm -f $(BINS) cwe78-aarch64-vuln cwe78-aarch64-vuln.o cwe78-aarch64-stubs.o \
 		cwe732-aarch64-vuln cwe732-aarch64-vuln.o cwe732-aarch64-stubs.o \
 		cwe190-aarch64-vuln cwe190-aarch64-vuln.o cwe190-aarch64-stubs.o \
 		cwe134-aarch64-vuln cwe134-aarch64-vuln.o cwe134-aarch64-stubs.o \
-		cwe415-aarch64-vuln cwe415-aarch64-vuln.o cwe415-aarch64-stubs.o
+		cwe415-aarch64-vuln cwe415-aarch64-vuln.o cwe415-aarch64-stubs.o \
+		cwe369-aarch64-vuln cwe369-aarch64-vuln.o cwe369-aarch64-stubs.o

@@ -206,9 +206,181 @@ def test_no_division_returns_empty():
     assert eng.divisions_with_unguarded_divisor() == []
 
 
-def test_returns_empty_on_non_amd64():
-    """The register-level helper is x86_64-only; returns [] on AArch64."""
-    eng = _engine([_unguarded_reg_div()], arch_name="AARCH64")
+def test_returns_empty_on_unsupported_arch():
+    """The helper is arch-aware for AMD64/AARCH64 only; [] on anything else."""
+    eng = _engine([_unguarded_reg_div()], arch_name="MIPS32")
+    assert eng.divisions_with_unguarded_divisor() == []
+
+
+# ---------------------------------------------------------------------------
+# AArch64 fixtures and tests
+#
+# AArch64 integer division uses `sdiv`/`udiv` with the form
+# `sdiv Wd, Wn, Wm` — the *third* operand (Wm/Xm) is the divisor (unlike x86_64
+# where the single explicit operand is the divisor). The guard idioms that mark
+# a divisor as zero-checked are `cbz`/`cbnz <reg>` (compare-and-branch on zero)
+# and `cmp <reg>, #0` followed by a conditional branch (`b.eq`/`b.ne`/...).
+# ---------------------------------------------------------------------------
+
+
+def _aarch64_unguarded_div(base=0x410200, name="compute", mnemonic="sdiv"):
+    """sdiv with a register divisor and no preceding zero-check."""
+    insns = [
+        _Insn(base + 0x0, "ldr", "w8, [sp, #0xc]"),
+        _Insn(base + 0x4, "ldr", "w9, [sp, #0x8]"),
+        _Insn(base + 0x8, mnemonic, "w0, w8, w9"),
+    ]
+    return _Func(base, name, insns)
+
+
+def _aarch64_cbz_guarded_div(base=0x410300, name="safe_div"):
+    """sdiv preceded by `cbz w9, .ret` — a compare-and-branch zero-check."""
+    insns = [
+        _Insn(base + 0x0, "ldr", "w9, [sp, #0x8]"),
+        _Insn(base + 0x4, "cbz", "w9, #" + hex(base + 0x20)),
+        _Insn(base + 0x8, "ldr", "w8, [sp, #0xc]"),
+        _Insn(base + 0xC, "sdiv", "w0, w8, w9"),
+    ]
+    return _Func(base, name, insns)
+
+
+def _aarch64_cmp_guarded_div(base=0x410400, name="cmp_safe"):
+    """sdiv preceded by `cmp w9, #0 ; b.eq .ret` — the cmp+branch zero-check."""
+    insns = [
+        _Insn(base + 0x0, "ldr", "w9, [sp, #0x8]"),
+        _Insn(base + 0x4, "cmp", "w9, #0"),
+        _Insn(base + 0x8, "b.eq", "#" + hex(base + 0x20)),
+        _Insn(base + 0xC, "ldr", "w8, [sp, #0xc]"),
+        _Insn(base + 0x10, "sdiv", "w0, w8, w9"),
+    ]
+    return _Func(base, name, insns)
+
+
+def test_aarch64_unguarded_signed_division_detected():
+    eng = _engine([_aarch64_unguarded_div()], arch_name="AARCH64")
+    divs = eng.divisions_with_unguarded_divisor()
+    assert len(divs) == 1
+    d = divs[0]
+    assert d["function"] == "compute"
+    # The divisor is the third operand on AArch64.
+    assert d["divisor"] == "w9"
+    assert d["address"] == 0x410200 + 0x8
+
+
+def test_aarch64_unguarded_unsigned_division_detected():
+    eng = _engine([_aarch64_unguarded_div(mnemonic="udiv")], arch_name="AARCH64")
+    divs = eng.divisions_with_unguarded_divisor()
+    assert len(divs) == 1
+    assert divs[0]["divisor"] == "w9"
+
+
+def test_aarch64_cbz_guarded_division_not_flagged():
+    """`cbz w9, .ret` directly tests the divisor against zero -> guarded."""
+    eng = _engine([_aarch64_cbz_guarded_div()], arch_name="AARCH64")
+    assert eng.divisions_with_unguarded_divisor() == []
+
+
+def test_aarch64_cmp_guarded_division_not_flagged():
+    """`cmp w9, #0 ; b.eq` is the cmp+branch zero-check idiom -> guarded."""
+    eng = _engine([_aarch64_cmp_guarded_div()], arch_name="AARCH64")
+    assert eng.divisions_with_unguarded_divisor() == []
+
+
+def test_aarch64_x_register_divisor_widening_matched_in_guard():
+    """A `cbz x9` guard covers a `sdiv ..., x9` divisor (same logical reg)."""
+    base = 0x410500
+    insns = [
+        _Insn(base + 0x0, "ldr", "x9, [sp, #0x8]"),
+        _Insn(base + 0x4, "cbz", "x9, #" + hex(base + 0x20)),
+        _Insn(base + 0x8, "ldr", "x8, [sp, #0x10]"),
+        _Insn(base + 0xC, "sdiv", "x0, x8, x9"),
+    ]
+    eng = _engine([_Func(base, "x_guard", insns)], arch_name="AARCH64")
+    assert eng.divisions_with_unguarded_divisor() == []
+
+
+def test_aarch64_cbz_on_other_register_is_not_a_guard():
+    """`cbz` on an unrelated register does not guard the divisor -> flagged."""
+    base = 0x410600
+    insns = [
+        _Insn(base + 0x0, "ldr", "w9, [sp, #0x8]"),
+        _Insn(base + 0x4, "cbz", "w7, #" + hex(base + 0x20)),
+        _Insn(base + 0x8, "ldr", "w8, [sp, #0xc]"),
+        _Insn(base + 0xC, "sdiv", "w0, w8, w9"),
+    ]
+    eng = _engine([_Func(base, "wrong_guard", insns)], arch_name="AARCH64")
+    divs = eng.divisions_with_unguarded_divisor()
+    assert len(divs) == 1
+    assert divs[0]["function"] == "wrong_guard"
+
+
+def test_aarch64_slot_aliased_guard_not_flagged():
+    """Real -O0 codegen: the guard tests a register reloaded from the same slot
+    as the divisor. `cbnz w8, ...` where both w8 and the divisor w9 come from
+    `[sp,#0x4]` is the zero-check on that slot -> guarded (no false positive)."""
+    base = 0x410A00
+    insns = [
+        _Insn(base + 0x0, "str", "w1, [sp, #0x4]"),
+        _Insn(base + 0x4, "ldr", "w8, [sp, #0x4]"),     # guard reg <- slot
+        _Insn(base + 0x8, "cbnz", "w8, #" + hex(base + 0x20)),
+        _Insn(base + 0xC, "ldr", "w8b, [sp, #0x8]"),    # numerator
+        _Insn(base + 0x10, "ldr", "w9, [sp, #0x4]"),    # divisor <- same slot
+        _Insn(base + 0x14, "sdiv", "w8, w8, w9"),
+    ]
+    eng = _engine([_Func(base, "safe_ratio", insns)], arch_name="AARCH64")
+    assert eng.divisions_with_unguarded_divisor() == []
+
+
+def test_aarch64_cmp_slot_aliased_guard_not_flagged():
+    """`cmp w8, #0 ; b.eq` where w8 reloads the divisor's slot -> guarded."""
+    base = 0x410B00
+    insns = [
+        _Insn(base + 0x0, "str", "w1, [sp, #0x4]"),
+        _Insn(base + 0x4, "ldr", "w8, [sp, #0x4]"),
+        _Insn(base + 0x8, "cmp", "w8, #0"),
+        _Insn(base + 0xC, "b.eq", "#" + hex(base + 0x20)),
+        _Insn(base + 0x10, "ldr", "w9, [sp, #0x4]"),
+        _Insn(base + 0x14, "sdiv", "w8, w8, w9"),
+    ]
+    eng = _engine([_Func(base, "cmp_slot_safe", insns)], arch_name="AARCH64")
+    assert eng.divisions_with_unguarded_divisor() == []
+
+
+def test_aarch64_guard_on_unrelated_slot_is_not_a_guard():
+    """A cbz on a register loaded from a DIFFERENT slot does not guard the
+    divisor -> flagged."""
+    base = 0x410C00
+    insns = [
+        _Insn(base + 0x0, "ldr", "w8, [sp, #0x10]"),     # unrelated slot
+        _Insn(base + 0x4, "cbz", "w8, #" + hex(base + 0x20)),
+        _Insn(base + 0x8, "ldr", "w9, [sp, #0x4]"),      # divisor slot
+        _Insn(base + 0xC, "sdiv", "w0, w8, w9"),
+    ]
+    eng = _engine([_Func(base, "wrong_slot", insns)], arch_name="AARCH64")
+    divs = eng.divisions_with_unguarded_divisor()
+    assert len(divs) == 1
+    assert divs[0]["function"] == "wrong_slot"
+
+
+def test_aarch64_no_division_returns_empty():
+    base = 0x410700
+    insns = [
+        _Insn(base + 0x0, "ldr", "w8, [sp, #0xc]"),
+        _Insn(base + 0x4, "add", "w8, w8, #1"),
+        _Insn(base + 0x8, "ret", ""),
+    ]
+    eng = _engine([_Func(base, "noop", insns)], arch_name="AARCH64")
+    assert eng.divisions_with_unguarded_divisor() == []
+
+
+def test_aarch64_plt_and_simprocedure_skipped():
+    plt = _Func(
+        0x410800, "div@plt", [_Insn(0x410800, "sdiv", "w0, w8, w9")], is_plt=True
+    )
+    sim = _Func(
+        0x410900, "sim", [_Insn(0x410900, "sdiv", "w0, w8, w9")], is_simprocedure=True
+    )
+    eng = _engine([plt, sim], arch_name="AARCH64")
     assert eng.divisions_with_unguarded_divisor() == []
 
 
