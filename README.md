@@ -45,7 +45,7 @@ autopsy --version
 ## Usage
 
 ```
-autopsy --binary PATH [--checks {119,190,338,369,377,415,416,78,134,676,732,787,all}] [--max-states N]
+autopsy --binary PATH [--checks {119,190,338,367,369,377,415,416,78,134,676,732,787,all}] [--max-states N]
         [--format json|sarif] [--fail-on LEVEL] [--baseline PATH] [--write-baseline PATH]
 autopsy --list-checks [--format json]
 ```
@@ -170,8 +170,8 @@ never written from, nor applied to, a half-finished run.
 
 | Architecture | Checks that run |
 |---|---|
-| **x86_64 (AMD64)** | all checks (CWE-119, 190, 338, 369, 377, 415, 416, 78, 134, 676, 732, 787) |
-| **AArch64 (ARM64)** | the call-site-driven checks: **CWE-78**, **CWE-190**, **CWE-338**, **CWE-377** and **CWE-676** |
+| **x86_64 (AMD64)** | all checks (CWE-119, 190, 338, 367, 369, 377, 415, 416, 78, 134, 676, 732, 787) |
+| **AArch64 (ARM64)** | the call-site-driven checks: **CWE-78**, **CWE-190**, **CWE-338**, **CWE-367**, **CWE-377** and **CWE-676** |
 
 On an AArch64 target, the register-level checks (CWE-119/369/415/416/134/787)
 rely on x86_64 register conventions, so they are **skipped** rather than
@@ -185,9 +185,9 @@ autopsy --binary ./arm64-target --checks all
 
 ```json
 {
-  "checks": [119, 190, 338, 369, 377, 415, 416, 78, 134, 676, 732, 787],
+  "checks": [119, 190, 338, 367, 369, 377, 415, 416, 78, 134, 676, 732, 787],
   "skipped_checks": [119, 369, 415, 416, 134, 787],
-  "findings": [ /* CWE-78 / CWE-190 / CWE-338 / CWE-377 / CWE-676 findings */ ]
+  "findings": [ /* CWE-78 / CWE-190 / CWE-338 / CWE-367 / CWE-377 / CWE-676 findings */ ]
 }
 ```
 
@@ -723,6 +723,54 @@ autopsy --binary tests/fixtures/cwe732-vuln --checks 732 --format json
   ],
   "evidence": "chmod() sets mode 0o777 in expose_secret: grants group-write and world-write access, making the resource writable beyond its owner; restrict to 0o600/0o644 (owner-write only)",
   "confidence": "high"
+}
+```
+
+### CWE-367 — time-of-check time-of-use (TOCTOU) race condition
+
+A function that **checks a path by name and then uses a path by name**, leaving
+a race window between the two. The textbook case is `access()` before `open()`:
+a setuid program asks `access(path, W_OK)` "may the *real* user write here?", the
+check passes, and the program then `open()`s the path with its elevated
+privileges. An attacker who swaps `path` for a symlink in the interval (winning
+the race) redirects the privileged write to a file the real user could never
+have opened — a classic local privilege escalation. The same window exists for
+any by-name check→use pair: `stat`/`lstat` followed by
+`open`/`fopen`/`creat`/`unlink`/`rename`/`chmod`/`symlink` and friends. This is
+the weakness CWE-367 names.
+
+The detector is **call-site-driven**: it walks each function in address order
+and pairs a by-name *check* call (`access`/`faccessat`/`stat`/`lstat` and
+variants) with the first by-name *use* call that follows it. It resolves direct
+calls by symbol name and never inspects registers, so — like CWE-78/190/338/377/
+676 — it runs on **both x86_64 and AArch64**. The finding is anchored at the
+time-of-use and records both program points in its `taint_trace`.
+
+Zero-false-positive posture: the safe descriptor-based pattern (`open` once, then
+`fstat`/`fchmod` on the returned **file descriptor**) does not match — those
+operate on an `fd`, not a path, so they are absent from the use set and never
+fire. A function that only checks (no following by-name use) or only uses (no
+preceding check) is silent too; both halves must be co-located. Like CWE-377/676,
+CWE-367 needs no attacker-input source — the check→use sequence is the structural
+race. Findings carry `confidence: "medium"`: the sequence is a definitive
+structural window, but autopsy does not prove the two calls reference the *same*
+path string (that would require full taint analysis).
+
+```bash
+autopsy --binary tests/fixtures/cwe367-vuln --checks 367 --format json
+```
+
+```json
+{
+  "cwe": 367,
+  "function": "access_then_open",
+  "address": "0x4011e8",
+  "taint_trace": [
+    {"address": "0x4011ce", "description": "time-of-check: access() inspects the path by name"},
+    {"address": "0x4011e8", "description": "time-of-use: open() operates on the path by name (window between the two is the race)"}
+  ],
+  "evidence": "access() checks a path by name and open() then operates on a path by name in access_then_open: an attacker who alters the path between the check and the use (a TOCTOU race, e.g. a symlink swap) makes open() act on a different object than access() vetted; open() first, then check the returned fd, or use access(..., AT_EACCESS) on a descriptor",
+  "confidence": "medium"
 }
 ```
 

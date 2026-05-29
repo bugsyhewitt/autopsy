@@ -17,6 +17,7 @@ run without a compiler. This file documents how to regenerate them if needed.
 | `cwe676-vuln.c` / `cwe676-vuln` | source + binary: use of potentially dangerous functions (`gets`/`strcpy`/`sprintf`); the bounded siblings (`strncpy`/`snprintf`/`fgets`) must not be flagged |
 | `cwe377-vuln.c` / `cwe377-vuln` | source + binary: insecure temporary files (`tmpnam`/`mktemp`/`tempnam`); the atomic `mkstemp()` in `safe_create()` must not be flagged |
 | `cwe732-vuln.c` / `cwe732-vuln` | source + binary: incorrect permission assignment (`chmod(path,0777)`/`chmod(path,0666)`/`umask(0)`); the restrictive `chmod(path,0600)` in `lock_down()` and `umask(0077)` in `tight_umask()` must not be flagged |
+| `cwe367-vuln.c` / `cwe367-vuln` | source + binary: TOCTOU race (`access`→`open`, `stat`→`fopen`, `lstat`→`unlink`); the descriptor-based `safe_open_then_fstat()` and the single-sided `only_check()`/`only_use()` must not be flagged |
 | `cwe78-aarch64-vuln.c` + `cwe78-aarch64-stubs.c` / `cwe78-aarch64-vuln` | source + binary: **AArch64** OS command injection (exercises ARM64 support) |
 | `clean-baseline.c` / `clean-baseline` | source + binary: none of the four classes (zero-false-positive check) |
 | `Makefile` | build rules |

@@ -110,7 +110,10 @@ class AngrEngine:
     # they resolve direct calls by symbol name and never inspect registers, so
     # they are sound on AArch64 too. CWE-338 (weak-PRNG use) is the same shape —
     # it resolves direct calls by symbol name and never inspects registers.
-    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 190, 338, 377, 676)
+    # CWE-367 (TOCTOU check->use) is likewise call-site-driven (it pairs a
+    # by-name check call with a following by-name use call) and never inspects
+    # registers, so it runs on AArch64 too.
+    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 190, 338, 367, 377, 676)
 
     def assert_supported(self) -> None:
         """Reject targets on architectures autopsy cannot analyze.
@@ -1092,6 +1095,111 @@ class AngrEngine:
     def _reg_in(reg: str, aliases: set[str]) -> bool:
         """True if ``reg`` (or its 64-bit widening) is in the alias set."""
         return reg in aliases or AngrEngine._widen(reg) in aliases
+
+    # File-system *check* functions that inspect a path by name (CWE-367
+    # time-of-check). Each tests a property of a path string but does not open
+    # it, so the property it observed can change before the matching use.
+    _TOCTOU_CHECK_FNS: frozenset[str] = frozenset({
+        "access", "faccessat", "faccessat2",
+        "stat", "stat64", "lstat", "lstat64", "fstatat", "fstatat64",
+        "__xstat", "__lxstat", "__xstat64", "__lxstat64",
+    })
+
+    # File-system *use* functions that act on a path by name (CWE-367
+    # time-of-use). Operating by name (rather than on a descriptor) is what
+    # makes the use racy: the path may now resolve to a different object than
+    # the one the check inspected.
+    _TOCTOU_USE_FNS: frozenset[str] = frozenset({
+        "open", "open64", "openat", "openat64", "creat", "creat64",
+        "fopen", "fopen64", "freopen",
+        "unlink", "unlinkat", "remove", "rename", "renameat",
+        "chmod", "chown", "lchown", "symlink", "link", "mkdir", "rmdir",
+        "truncate",
+    })
+
+    def toctou_check_then_use_sequences(self) -> list[dict[str, Any]]:
+        """Find time-of-check/time-of-use (CWE-367) check→use sequences.
+
+        Detects the classic TOCTOU race where a program first *checks* a path
+        by name (``access``/``stat``/``lstat`` and friends — the time of check)
+        and then later, in the same function, *uses* a path by name
+        (``open``/``fopen``/``creat``/``unlink`` etc. — the time of use). The
+        property the check observed (existence, permission, type) can change in
+        the interval, so an attacker who wins the race (commonly by swapping the
+        path for a symlink) makes the program operate on a different object than
+        the one it vetted — the ``access()``-before-``open()`` privilege bug
+        being the textbook case (CWE-367 / CWE-363).
+
+        The detector is purely call-site-driven: it resolves direct calls by
+        symbol name and never inspects registers, so it is architecture-agnostic
+        (runs identically on x86_64 ``call`` and AArch64 ``bl``). For each
+        function it walks the instruction stream in address order; once a check
+        call is seen, the *next* by-name use call in the same function is
+        reported as the time-of-use that closes the window. Only the first use
+        after a check fires (one finding per check), keeping the signal tight.
+
+        Zero-false-positive posture: a function that only checks (no following
+        use) or only uses (no preceding check) is silent — the race needs both
+        halves co-located. The descriptor-based safe pattern
+        (``open`` then ``fstat``/``fchmod`` on the returned ``fd``) does not
+        match: ``fstat``/``fchmod`` operate on a descriptor, not a path, so they
+        are deliberately absent from both sets and never trigger a finding.
+
+        Each returned dict describes one race:
+            {
+                "function":      caller function name,
+                "check_name":    the time-of-check symbol (e.g. "access"),
+                "check_address": address of the check call instruction,
+                "use_name":      the time-of-use symbol (e.g. "open"),
+                "use_address":   address of the use call instruction,
+            }
+        """
+        cfg = self.cfg()
+        call_mnemonics = self._call_mnemonics()
+        results: list[dict[str, Any]] = []
+
+        for func in cfg.kb.functions.values():
+            if getattr(func, "is_plt", False) or getattr(func, "is_simprocedure", False):
+                continue
+
+            insns: list[Any] = []
+            for block in func.blocks:
+                try:
+                    insns.extend(block.capstone.insns)
+                except Exception:  # pragma: no cover - defensive
+                    continue
+            insns.sort(key=lambda i: i.address)
+
+            pending_check: tuple[str, int] | None = None
+            for insn in insns:
+                if insn.mnemonic not in call_mnemonics:
+                    continue
+                target = self._resolve_call_target(insn, cfg)
+                if target is None:
+                    continue
+                if pending_check is None:
+                    if target in self._TOCTOU_CHECK_FNS:
+                        pending_check = (target, insn.address)
+                    continue
+                # We have an open check; the next by-name use closes the window.
+                if target in self._TOCTOU_USE_FNS:
+                    check_name, check_addr = pending_check
+                    results.append(
+                        {
+                            "function": func.name,
+                            "check_name": check_name,
+                            "check_address": check_addr,
+                            "use_name": target,
+                            "use_address": insn.address,
+                        }
+                    )
+                    pending_check = None
+                elif target in self._TOCTOU_CHECK_FNS:
+                    # A second check before any use: re-anchor on the latest one
+                    # (its window is the one closest to the eventual use).
+                    pending_check = (target, insn.address)
+
+        return results
 
     def _resolve_call_target(self, insn: Any, cfg: Any) -> str | None:
         """Resolve a call instruction's target to a symbol name if possible.
