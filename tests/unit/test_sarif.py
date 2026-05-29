@@ -6,8 +6,9 @@ import json
 
 import pytest
 
+from autopsy.baseline import fingerprint as _finding_fingerprint
 from autopsy.report import Finding, Report, TaintPoint
-from autopsy.sarif import to_sarif, to_sarif_json
+from autopsy.sarif import _FINGERPRINT_KEY, to_sarif, to_sarif_json
 
 
 def _make_report(findings=None, checks=None, error=None):
@@ -186,6 +187,53 @@ def test_cwe787_has_named_rule_not_generic_fallback():
     assert rule["shortDescription"]["text"] == "Out-of-bounds Write"
     assert rule["fullDescription"]["text"] == "Out-of-bounds Write"
     assert rule["helpUri"] == "https://cwe.mitre.org/data/definitions/787.html"
+
+
+# --- partialFingerprints (cross-run alert tracking) ---
+
+
+def test_result_has_partial_fingerprint():
+    # GitHub Code Scanning uses partialFingerprints to track an alert across
+    # runs/commits. Every result must carry one under autopsy's namespaced key.
+    f = _finding()
+    sarif = to_sarif(_make_report(findings=[f]))
+    result = sarif["runs"][0]["results"][0]
+    assert _FINGERPRINT_KEY in result["partialFingerprints"]
+    assert result["partialFingerprints"][_FINGERPRINT_KEY]
+
+
+def test_partial_fingerprint_matches_baseline_fingerprint():
+    # The SARIF tracking key must be the SAME build-resilient fingerprint the
+    # --baseline feature computes, so the two features key on identical finding
+    # identity (a finding suppressed by baseline is the same one GitHub tracks).
+    f = _finding(cwe=416, fn="do_free", addr=0x401200, evidence="double use")
+    sarif = to_sarif(_make_report(findings=[f], checks=[416]))
+    result = sarif["runs"][0]["results"][0]
+    assert result["partialFingerprints"][_FINGERPRINT_KEY] == _finding_fingerprint(f)
+
+
+def test_partial_fingerprint_is_address_independent():
+    # The whole point: recompiling shifts addresses but the fingerprint must not
+    # change, so GitHub does not churn the alert. Two findings identical except
+    # for address must produce the same partialFingerprint.
+    f1 = _finding(cwe=119, fn="parse", addr=0x401140, evidence="overflow")
+    f2 = _finding(cwe=119, fn="parse", addr=0x499999, evidence="overflow")
+    s1 = to_sarif(_make_report(findings=[f1]))
+    s2 = to_sarif(_make_report(findings=[f2]))
+    fp1 = s1["runs"][0]["results"][0]["partialFingerprints"][_FINGERPRINT_KEY]
+    fp2 = s2["runs"][0]["results"][0]["partialFingerprints"][_FINGERPRINT_KEY]
+    assert fp1 == fp2
+
+
+def test_partial_fingerprint_distinguishes_different_findings():
+    # Different vulnerabilities must get different fingerprints so GitHub tracks
+    # them as separate alerts.
+    f_a = _finding(cwe=119, fn="parse", addr=0x4010, evidence="overflow A")
+    f_b = _finding(cwe=416, fn="free_it", addr=0x4020, evidence="use after free")
+    sarif = to_sarif(_make_report(findings=[f_a, f_b], checks=[119, 416]))
+    results = sarif["runs"][0]["results"]
+    fps = {r["partialFingerprints"][_FINGERPRINT_KEY] for r in results}
+    assert len(fps) == 2
 
 
 # --- Confidence -> SARIF level mapping ---

@@ -232,6 +232,18 @@ gh api --method POST /repos/OWNER/REPO/code-scanning/sarifs \
   -f sarif="$(gzip -c autopsy.sarif | base64 -w0)"
 ```
 
+**Stable alert tracking across builds.** Every result carries a
+`partialFingerprints` entry under the key `autopsy/finding/v1`. GitHub Code
+Scanning uses `partialFingerprints` to recognize the same alert from one run to
+the next and de-duplicate it. This matters specifically for binary analysis:
+autopsy's locations are binary addresses, and those shift on every recompile, so
+without a stable fingerprint GitHub would close and re-open the *same*
+vulnerability as a brand-new alert on each commit (alert churn). The fingerprint
+is the build-resilient `CWE | function | evidence` digest — the *same* identity
+the `--baseline` feature uses to suppress accepted findings, so SARIF cross-run
+tracking and baseline suppression always agree on what counts as "the same
+finding."
+
 ### CWE-119 — buffer over-read/write via attacker-controlled offset
 
 A memory access whose *index* is derived from attacker input, with no
