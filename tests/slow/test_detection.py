@@ -430,16 +430,69 @@ def test_aarch64_runs_cwe732_under_all(require_angr, fixtures_dir):
     )
 
 
+def test_cwe134_detected_on_aarch64(require_angr, fixtures_dir):
+    # AArch64 (ARM64) support for the arch-aware register-level CWE-134 check:
+    # the printf-family format-string argument is read out of the AAPCS64
+    # argument register (x0 for printf, x1 for fprintf) and confirmed to be a
+    # stack-slot reload (`ldr x0, [sp, #N]`) rather than a rodata literal
+    # (`adrp`/`adr`) — mirroring the x86_64 `rdi`/`lea [rip+disp]` behavior. The
+    # same vulnerable/safe split as the x86_64 fixture must hold.
+    rep = _analyze(fixtures_dir, "cwe134-aarch64-vuln", "134")
+    d = rep.to_dict()
+    assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
+    cwe134 = [f for f in d["findings"] if f["cwe"] == 134]
+    assert cwe134, f"expected CWE-134 findings on aarch64, got {d['findings']}"
+    for f in cwe134:
+        _assert_finding_contract(f, 134)
+    funcs = {f["function"] for f in cwe134}
+    # printf(user) in emit() and fprintf(stderr, user) in emit_err() both fire.
+    assert "emit" in funcs, f"printf(user) not flagged on aarch64: {cwe134}"
+    assert "emit_err" in funcs, f"fprintf(stderr, user) not flagged on aarch64: {cwe134}"
+    # The literal-format printf in log_line() (adrp/adr rodata pointer) must NOT
+    # fire — the zero-false-positive guarantee on the safe companion.
+    assert "log_line" not in funcs, (
+        f"the literal-format printf in log_line must not be flagged on aarch64: {cwe134}"
+    )
+    # Non-literal-format + global-source heuristic -> medium confidence (same as x86_64).
+    assert all(f["confidence"] == "medium" for f in cwe134)
+    # The evidence names the AArch64 format register (x0 / x1).
+    emit_finding = next(f for f in cwe134 if f["function"] == "emit")
+    assert "x0" in emit_finding["evidence"], (
+        f"expected the x0 format register in the evidence: {emit_finding}"
+    )
+    emit_err_finding = next(f for f in cwe134 if f["function"] == "emit_err")
+    assert "x1" in emit_err_finding["evidence"], (
+        f"expected the x1 format register in the evidence: {emit_err_finding}"
+    )
+
+
+def test_aarch64_runs_cwe134_under_all(require_angr, fixtures_dir):
+    # Under "all" on AArch64, CWE-134 now runs (it is no longer in the skipped
+    # set) and its findings surface alongside the call-site-driven checks.
+    rep = _analyze(fixtures_dir, "cwe134-aarch64-vuln", "all")
+    d = rep.to_dict()
+    assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
+    # CWE-134 must NOT appear in the skipped set on AArch64 anymore.
+    assert 134 not in d["skipped_checks"], (
+        f"CWE-134 should run on AArch64, but was skipped: {d['skipped_checks']}"
+    )
+    assert any(f["cwe"] == 134 for f in d["findings"]), (
+        f"expected CWE-134 findings under 'all' on aarch64: {d['findings']}"
+    )
+
+
 def test_aarch64_skips_register_level_checks(require_angr, fixtures_dir):
     # On AArch64, the x86_64-only register-level checks (CWE-119/369/415/416/
-    # 476/134/787) are skipped rather than producing unsound results; the
-    # arch-agnostic checks — including the arch-aware CWE-732 — still run.
+    # 476/787) are skipped rather than producing unsound results; the
+    # arch-agnostic checks — including the arch-aware CWE-732/190/134 — still run.
     rep = _analyze(fixtures_dir, "cwe78-aarch64-vuln", "all")
     d = rep.to_dict()
     assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
-    assert set(d["skipped_checks"]) == {119, 369, 415, 416, 476, 134, 787}
-    # CWE-732 is arch-aware and must NOT be skipped on AArch64.
+    assert set(d["skipped_checks"]) == {119, 369, 415, 416, 476, 787}
+    # CWE-732/190/134 are arch-aware and must NOT be skipped on AArch64.
     assert 732 not in d["skipped_checks"]
+    assert 190 not in d["skipped_checks"]
+    assert 134 not in d["skipped_checks"]
     # The CWE-78 finding still surfaces under "all".
     assert any(f["cwe"] == 78 for f in d["findings"])
 

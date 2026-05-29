@@ -17,7 +17,7 @@ design.
 
 > **Scope:** ELF only. Full check coverage on x86_64; the call-site-driven
 > checks (CWE-78/338/367/377/676) plus the arch-aware register-level checks
-> (CWE-732, CWE-190) also run on AArch64. See
+> (CWE-732, CWE-190, CWE-134) also run on AArch64. See
 > [Architecture support](#architecture-support) and
 > [What autopsy is not](#what-autopsy-is-not).
 
@@ -172,7 +172,7 @@ never written from, nor applied to, a half-finished run.
 | Architecture | Checks that run |
 |---|---|
 | **x86_64 (AMD64)** | all checks (CWE-119, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787) |
-| **AArch64 (ARM64)** | the call-site-driven checks (**CWE-78**, **CWE-338**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**) |
+| **AArch64 (ARM64)** | the call-site-driven checks (**CWE-78**, **CWE-338**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**, **CWE-134**) |
 
 On an AArch64 target, the **CWE-732** permission check runs natively: its register
 reasoning only reads a single mode/mask *immediate* out of the AAPCS64 argument
@@ -182,21 +182,27 @@ x86_64-bound. The **CWE-190** integer-overflow check is likewise arch-aware: it
 inspects the 32-bit size-arithmetic register before the allocator call, and the
 engine knows both the x86_64 forms (`imul`/`shl` over `e**`/`r**d`) and the
 AArch64 forms (`mul`/`lsl` over `w0..w30` — e.g. `count * 4096` lowers to
-`lsl w8, w8, #0xc`), so it runs on AArch64 too. The remaining register-level checks
-(CWE-119/369/415/416/476/134/787) rely on x86_64 stack-slot/register conventions,
+`lsl w8, w8, #0xc`), so it runs on AArch64 too. The **CWE-134** uncontrolled-
+format-string check is arch-aware too: it reads the printf-family *format-string*
+argument out of the AAPCS64 register (`x0` for `printf`, `x1` for
+`fprintf`/`sprintf`/`syslog`, `x2` for `snprintf`) and recognizes both the x86_64
+rodata-literal form (`lea reg, [rip+disp]`) and the AArch64 one (`adrp`/`adr`); a
+stack-slot reload (`ldr x0, [sp, #N]`) is the non-literal/attacker-controlled
+format, so it runs on AArch64 too. The remaining register-level checks
+(CWE-119/369/415/416/476/787) rely on x86_64 stack-slot/register conventions,
 so they are **skipped** rather than producing unsound results. Skipped checks are
 listed in the report's `skipped_checks` array and noted on stderr:
 
 ```bash
 autopsy --binary ./arm64-target --checks all
-# stderr: note: skipped CWE-119, CWE-369, CWE-415, CWE-416, CWE-476, CWE-134, CWE-787 (not supported on this target's architecture)
+# stderr: note: skipped CWE-119, CWE-369, CWE-415, CWE-416, CWE-476, CWE-787 (not supported on this target's architecture)
 ```
 
 ```json
 {
   "checks": [119, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787],
-  "skipped_checks": [119, 369, 415, 416, 476, 134, 787],
-  "findings": [ /* CWE-78 / 190 / 338 / 367 / 377 / 676 / 732 findings */ ]
+  "skipped_checks": [119, 369, 415, 416, 476, 787],
+  "findings": [ /* CWE-78 / 134 / 190 / 338 / 367 / 377 / 676 / 732 findings */ ]
 }
 ```
 
@@ -488,10 +494,16 @@ autopsy --binary tests/fixtures/cwe134-vuln --checks 134 --format json
 }
 ```
 
-> The CWE-134 check uses x86_64 SysV register/stack-slot conventions (the
-> format argument register varies by sink: `rdi` for `printf`, `rsi` for
-> `fprintf`/`sprintf`/`syslog`, `rdx` for `snprintf`) and runs on x86_64
-> (AMD64) targets only; on AArch64 the register-level checks are skipped.
+> This is an **arch-aware register-level** detector. The format-argument
+> register varies by sink and architecture — SysV/x86_64 (`rdi` for `printf`,
+> `rsi` for `fprintf`/`sprintf`/`syslog`, `rdx` for `snprintf`) and AAPCS64/
+> AArch64 (`x0`/`x1`/`x2` at the same parameter positions) — and the engine
+> recognizes both the x86_64 rodata-literal form (`lea reg, [rip+disp]`) and the
+> AArch64 one (`adrp`/`adr`), with a stack-slot reload (`mov reg, [rbp-N]` on
+> x86_64, `ldr xN, [sp, #N]` on AArch64) marking the non-literal format. So —
+> like CWE-732 and CWE-190 — it runs on **both x86_64 and AArch64** (the
+> `tests/fixtures/cwe134-aarch64-vuln` ARM64 fixture exercises it). It is *not*
+> skipped on AArch64.
 
 ### CWE-787 — out-of-bounds write (heap buffer overflow)
 

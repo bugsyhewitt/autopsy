@@ -33,6 +33,16 @@ Confidence rationale:
   the specific format slot, so it is medium rather than high. Full VEX-IR taint
   from source to the format slot is a post-v0.1 direction.
 
+Architecture support:
+  x86_64 (AMD64) and AArch64 (ARM64). The detection is arch-agnostic at the
+  check level — it delegates the structural half to the arch-aware engine helper
+  :meth:`AngrEngine.format_string_sinks_with_nonliteral_format`, which reads the
+  format-string argument out of the per-architecture calling-convention register
+  (SysV ``rdi``/``rsi``/``rdx`` on x86_64; AAPCS64 ``x0``/``x1``/``x2`` on
+  AArch64) and recognizes both the x86_64 rodata-literal form (``lea reg,
+  [rip+disp]``) and the AArch64 one (``adrp``/``adr``). ``call_sites_to`` (used
+  for the input source) is already arch-aware.
+
 [Worker decision: non-literal-format + global-source heuristic] Proving that
 the exact bytes read by ``fgets`` reach the exact format slot would require the
 VEX-IR def-use analysis listed as a Tier 3 post-v0.1 direction. The
