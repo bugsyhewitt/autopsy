@@ -36,7 +36,7 @@ all: $(BINS) aarch64
 %: %.c
 	$(CC) $(ARCH) $(CFLAGS) -o $@ $<
 
-aarch64: cwe78-aarch64-vuln cwe732-aarch64-vuln cwe190-aarch64-vuln cwe134-aarch64-vuln cwe415-aarch64-vuln cwe416-aarch64-vuln cwe369-aarch64-vuln cwe119-aarch64-vuln cwe787-aarch64-vuln
+aarch64: cwe78-aarch64-vuln cwe732-aarch64-vuln cwe190-aarch64-vuln cwe134-aarch64-vuln cwe415-aarch64-vuln cwe416-aarch64-vuln cwe369-aarch64-vuln cwe119-aarch64-vuln cwe787-aarch64-vuln cwe476-aarch64-vuln
 
 cwe78-aarch64-vuln: cwe78-aarch64-vuln.c cwe78-aarch64-stubs.c
 	$(AARCH64_CC) $(AARCH64_TARGET) $(AARCH64_CFLAGS) -c cwe78-aarch64-vuln.c -o cwe78-aarch64-vuln.o
@@ -138,6 +138,19 @@ cwe787-aarch64-vuln: cwe787-aarch64-vuln.c cwe787-aarch64-stubs.c
 	$(AARCH64_LD) -o $@ cwe787-aarch64-vuln.o cwe787-aarch64-stubs.o -e _start --no-dynamic-linker
 	rm -f cwe787-aarch64-vuln.o cwe787-aarch64-stubs.o
 
+# AArch64 CWE-476 fixture: exercises the arch-aware NULL-pointer-dereference
+# check. The allocator return register x0 is spilled to a stack slot
+# (`str x0, [sp, #N]`), reloaded (`ldr xR, [sp, #N]`) and dereferenced through
+# that base register (`str wzr, [xR]`) with no NULL-check; the safe companion
+# guards the reloaded result with `cbz`/`cmp x0, #0` + `b.eq` (the AArch64
+# guard recognizers must catch this and stay silent). Same freestanding
+# cross-build recipe as the other AArch64 fixtures.
+cwe476-aarch64-vuln: cwe476-aarch64-vuln.c cwe476-aarch64-stubs.c
+	$(AARCH64_CC) $(AARCH64_TARGET) $(AARCH64_CFLAGS) -c cwe476-aarch64-vuln.c -o cwe476-aarch64-vuln.o
+	$(AARCH64_CC) $(AARCH64_TARGET) $(AARCH64_CFLAGS) -c cwe476-aarch64-stubs.c -o cwe476-aarch64-stubs.o
+	$(AARCH64_LD) -o $@ cwe476-aarch64-vuln.o cwe476-aarch64-stubs.o -e _start --no-dynamic-linker
+	rm -f cwe476-aarch64-vuln.o cwe476-aarch64-stubs.o
+
 clean:
 	rm -f $(BINS) cwe78-aarch64-vuln cwe78-aarch64-vuln.o cwe78-aarch64-stubs.o \
 		cwe732-aarch64-vuln cwe732-aarch64-vuln.o cwe732-aarch64-stubs.o \
@@ -147,4 +160,5 @@ clean:
 		cwe416-aarch64-vuln cwe416-aarch64-vuln.o cwe416-aarch64-stubs.o \
 		cwe369-aarch64-vuln cwe369-aarch64-vuln.o cwe369-aarch64-stubs.o \
 		cwe119-aarch64-vuln cwe119-aarch64-vuln.o cwe119-aarch64-stubs.o \
-		cwe787-aarch64-vuln cwe787-aarch64-vuln.o cwe787-aarch64-stubs.o
+		cwe787-aarch64-vuln cwe787-aarch64-vuln.o cwe787-aarch64-stubs.o \
+		cwe476-aarch64-vuln cwe476-aarch64-vuln.o cwe476-aarch64-stubs.o

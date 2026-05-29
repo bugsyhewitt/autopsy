@@ -183,9 +183,21 @@ class AngrEngine:
     #     AArch64 too. The call-site discovery (allocator/source/copy enumeration)
     #     is already arch-agnostic.
     #
-    # The remaining register-level check (CWE-476) still relies on x86_64
-    # stack-slot/alias conventions and is skipped on AArch64.
-    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 119, 134, 190, 338, 367, 369, 377, 415, 416, 676, 732, 787)
+    #     CWE-476 (NULL-pointer dereference of an unchecked allocator result)
+    #     locates the spill of the allocator's return register to a stack slot,
+    #     follows alias propagation through slot reloads and register copies,
+    #     and reports the first dereference through an aliasing register that is
+    #     not preceded by a NULL-check guard;
+    #     ``unchecked_alloc_dereferences`` knows both the SysV/x86_64 (``rax``
+    #     return; ``mov [rbp-N], rax`` spill; ``test reg, reg``/``cmp reg, 0`` +
+    #     conditional jump guard) and the AArch64 (``x0`` return; ``str x0,
+    #     [sp,#N]``/``[x29,#N]`` spill; ``cbz``/``cbnz`` on a slot-aliased
+    #     register, or ``cmp xR, #0``/``cmp xR, xzr``/``tst xR, xR`` +
+    #     ``b.<cond>`` guard) forms, so it is sound on AArch64 too.
+    #
+    # All register-level checks are now arch-aware; no check is skipped on
+    # AArch64.
+    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 119, 134, 190, 338, 367, 369, 377, 415, 416, 476, 676, 732, 787)
 
     def assert_supported(self) -> None:
         """Reject targets on architectures autopsy cannot analyze.
@@ -196,9 +208,9 @@ class AngrEngine:
         CWE-732 permission assignment, CWE-134 uncontrolled format string,
         CWE-415 double-free, CWE-416 use-after-free, CWE-369 divide-by-zero,
         CWE-119 buffer over-read/write via an attacker-controlled index,
-        CWE-787 heap OOB write via the malloc+bulk-copy co-location heuristic);
-        the remaining register-level check (CWE-476) uses x86_64 register
-        conventions and reports no findings on AArch64 — see
+        CWE-787 heap OOB write via the malloc+bulk-copy co-location heuristic,
+        CWE-476 NULL-pointer dereference of an unchecked allocator result).
+        All register-level checks are now arch-aware on AArch64 — see
         :meth:`checks_supported_on_arch`.
         """
         arch_name = self.project.arch.name
@@ -215,9 +227,8 @@ class AngrEngine:
         On x86_64 every check runs. On AArch64 only the architecture-agnostic
         checks in ``_ARCH_AGNOSTIC_CHECKS`` run — the call-site-driven ones plus
         the arch-aware register-level checks (CWE-732/190/134/415/416/369/119/
-        787). The remaining register-level check (CWE-476 NULL-deref) relies on
-        x86_64 stack-slot/register conventions and would silently mis-analyze
-        AArch64, so it is skipped rather than producing unsound results.
+        787/476). All register-level checks are now arch-aware; nothing is
+        skipped on AArch64.
 
         Args:
             cwes: The CWE ids the caller intends to run.
@@ -1830,8 +1841,9 @@ class AngrEngine:
     # Allocators whose return value is NULL on failure and must be NULL-checked
     # before the returned pointer is dereferenced. ``malloc``/``calloc``/
     # ``realloc`` return NULL when the allocation fails; ``strdup``/``strndup``
-    # and ``getenv`` likewise return NULL (no such variable / OOM). The SysV
-    # x86_64 ABI returns the pointer in ``rax``.
+    # and ``getenv`` likewise return NULL (no such variable / OOM). The result
+    # pointer is returned in the architecture's first return register — ``rax``
+    # on SysV x86_64, ``x0`` on AAPCS64 AArch64.
     _NULLABLE_ALLOCATORS: frozenset[str] = frozenset({
         "malloc", "calloc", "realloc", "reallocarray",
         "strdup", "strndup",
@@ -1874,15 +1886,29 @@ class AngrEngine:
         "alloc_address": int, "slot": str}`` — ``address`` is the dereference,
         ``alloc_address`` the allocator call.
 
-        x86_64 only: the result register (``rax``) and slot/guard reasoning rely
-        on x86_64 SysV conventions and -O0 codegen, so this returns an empty
-        list on non-AMD64 targets (the check is excluded from the
-        architecture-agnostic set and skipped on AArch64 upstream).
+        Arch-aware (x86_64 + AArch64). The x86_64 (SysV) implementation reads
+        the result register ``rax`` and recognizes ``test reg, reg`` / ``cmp
+        reg, 0`` + conditional-jump guards. The AArch64 (AAPCS64) path tracks
+        the result register ``x0`` spilled into a stack slot via ``str x0,
+        [sp,#N]`` / ``[x29,#N]``, follows reloads (``ldr xR, [sp,#N]``) and
+        register copies (``mov xA, xB``) to build the alias set, recognizes the
+        AArch64 NULL-check guard idioms (``cbz``/``cbnz`` on a slot-aliased
+        register; ``cmp xR, #0`` / ``cmp xR, xzr`` / ``tst xR, xR`` followed by
+        a ``b.<cond>`` branch), and reports the first dereference through an
+        aliasing register where the base is not a frame/stack register
+        (``sp``/``x29``/``fp``). On any other architecture this returns an empty
+        list.
         """
-        import re
+        arch = self.project.arch.name
+        if arch == "AMD64":
+            return self._unchecked_alloc_dereferences_amd64()
+        if arch == "AARCH64":
+            return self._unchecked_alloc_dereferences_aarch64()
+        return []
 
-        if self.project.arch.name != "AMD64":
-            return []
+    def _unchecked_alloc_dereferences_amd64(self) -> list[dict[str, Any]]:
+        """x86_64 (SysV) implementation of :meth:`unchecked_alloc_dereferences`."""
+        import re
 
         cfg = self.cfg()
         call_mnemonics = self._call_mnemonics()
@@ -2012,6 +2038,187 @@ class AngrEngine:
                     }
                 )
                 return
+
+    # ----- AArch64 NULL-deref (CWE-476) ----------------------------------
+    #
+    # AAPCS64: an allocator returns the pointer in ``x0``. -O0 codegen spills it
+    # to a stack slot immediately after the call (``str x0, [sp, #N]`` or
+    # ``[x29, #N]``); a later use reloads the slot into a register
+    # (``ldr xR, [sp, #N]``) and dereferences it (``str``/``ldr ..., [xR]``).
+    # The NULL-check guard idioms are: ``cbz``/``cbnz`` on a slot-aliased
+    # register, or ``cmp xR, #0`` / ``cmp xR, xzr`` / ``tst xR, xR`` followed
+    # by a ``b.<cond>`` branch.
+    _AARCH64_STORE_X0 = re.compile(
+        r"^x0,\s*\[(sp|x29|fp)(?:,\s*(#[+\-]?(?:0x[0-9a-f]+|\d+)))?\]$"
+    )
+    _AARCH64_LOAD_SLOT = re.compile(
+        r"^(x[0-9]+),\s*\[(sp|x29|fp)(?:,\s*(#[+\-]?(?:0x[0-9a-f]+|\d+)))?\]$"
+    )
+    _AARCH64_REG_COPY = re.compile(r"^(x[0-9]+),\s*(x[0-9]+)$")
+    # Match the base register inside a bracketed memory operand; bare ``[xR]``
+    # or ``[xR, #N]`` / ``[xR, xI, lsl #N]``. The ``(?!\d)`` keeps ``x1`` from
+    # accidentally swallowing the ``1`` of ``x10`` etc. (capstone already
+    # renders distinct names so this is belt-and-braces).
+    _AARCH64_DEREF_BASE = re.compile(r"\[(x[0-9]+|sp|x29|fp)(?!\d)")
+    _AARCH64_FRAME_REGS = frozenset({"sp", "x29", "fp"})
+    # AArch64 conditional branches. ``b.<cond>`` is rendered as one mnemonic
+    # token by capstone (``b.eq``, ``b.ne``, ``b.lt``, ...). ``cbz``/``cbnz``
+    # and ``tbz``/``tbnz`` are register-test branches that act as the guard
+    # without a preceding compare.
+    _AARCH64_COND_BRANCHES = frozenset({
+        "b.eq", "b.ne", "b.lt", "b.le", "b.gt", "b.ge",
+        "b.mi", "b.pl", "b.vs", "b.vc", "b.hi", "b.ls", "b.cs", "b.cc",
+        "b.hs", "b.lo",
+        "cbz", "cbnz", "tbz", "tbnz",
+    })
+
+    def _unchecked_alloc_dereferences_aarch64(self) -> list[dict[str, Any]]:
+        """AArch64 (AAPCS64) implementation of :meth:`unchecked_alloc_dereferences`.
+
+        Mirrors the x86_64 walker but uses AAPCS64 register conventions and
+        AArch64 spill/reload/guard mnemonics. The allocator's return register
+        is ``x0``; the spill is ``str x0, [sp, #N]`` / ``[x29, #N]``; a slot
+        reload is ``ldr xR, [base, #N]``; a register copy is ``mov xA, xB``;
+        and a dereference is any memory operand whose base register is a
+        non-frame GPR that aliases the result slot. A NULL-check guard is
+        either ``cbz``/``cbnz`` on a slot-aliased register, or a
+        ``cmp``/``tst`` on the slot/alias followed by ``b.<cond>``.
+        """
+        cfg = self.cfg()
+        call_mnemonics = self._call_mnemonics()
+        results: list[dict[str, Any]] = []
+
+        for func in cfg.kb.functions.values():
+            if getattr(func, "is_plt", False) or getattr(func, "is_simprocedure", False):
+                continue
+            insns: list[Any] = []
+            for block in func.blocks:
+                try:
+                    insns.extend(block.capstone.insns)
+                except Exception:  # pragma: no cover - defensive
+                    continue
+            insns.sort(key=lambda i: i.address)
+
+            for idx, insn in enumerate(insns):
+                if insn.mnemonic not in call_mnemonics:
+                    continue
+                target = self._resolve_call_target(insn, cfg)
+                if target not in self._NULLABLE_ALLOCATORS:
+                    continue
+
+                # Find the slot the result (x0) is spilled into in the few
+                # instructions immediately after the call.
+                slot: str | None = None
+                spill_idx = idx
+                for j in range(idx + 1, min(idx + 5, len(insns))):
+                    nxt = insns[j]
+                    if nxt.mnemonic == "str":
+                        ms = self._AARCH64_STORE_X0.match(nxt.op_str)
+                        if ms:
+                            off = ms.group(2) if ms.lastindex and ms.lastindex >= 2 else None
+                            if off is None:
+                                off = "+0"
+                            slot = f"{ms.group(1)}{off.replace(' ', '').lstrip('#')}"
+                            spill_idx = j
+                            break
+                    # A second call before the spill clobbers x0 -> give up.
+                    if nxt.mnemonic in call_mnemonics:
+                        break
+                if slot is None:
+                    continue
+
+                self._record_unchecked_deref_aarch64(
+                    insns, spill_idx, slot, func.name, target, insn.address, results,
+                )
+
+        return results
+
+    @classmethod
+    def _record_unchecked_deref_aarch64(
+        cls, insns, spill_idx, slot, func_name, alloc_name, alloc_address, results,
+    ) -> None:
+        """Scan forward from an AArch64 result spill for an unguarded dereference.
+
+        Builds the alias-register set from slot reloads and register-to-register
+        copies. A NULL-check guard on the slot or an aliasing register —
+        ``cbz``/``cbnz`` directly, or a ``cmp``/``tst`` on the slot/alias
+        followed within a small window by a ``b.<cond>`` — terminates the scan
+        without recording. Otherwise the first dereference through an aliasing
+        register (where the base is not a frame register) is appended.
+        """
+        alias_regs: set[str] = set()
+        scan = insns[spill_idx + 1:]
+        for i, insn in enumerate(scan):
+            op = insn.op_str
+
+            # A reload of the result slot establishes a fresh alias register.
+            if insn.mnemonic == "ldr":
+                ml = cls._AARCH64_LOAD_SLOT.match(op)
+                if ml:
+                    base = ml.group(2)
+                    off = ml.group(3) if ml.lastindex and ml.lastindex >= 3 else None
+                    if off is None:
+                        off = "+0"
+                    key = f"{base}{off.replace(' ', '').lstrip('#')}"
+                    if key == slot:
+                        alias_regs.add(ml.group(1))
+                        continue
+
+            # Register-copy propagation of an existing alias.
+            if insn.mnemonic == "mov":
+                mc = cls._AARCH64_REG_COPY.match(op)
+                if mc and mc.group(2) in alias_regs:
+                    alias_regs.add(mc.group(1))
+                    continue
+
+            # cbz/cbnz on an aliasing register is a direct NULL-check guard.
+            if insn.mnemonic in ("cbz", "cbnz"):
+                # op_str is ``xR, <label>``; the register is the first token.
+                first = op.split(",", 1)[0].strip()
+                if first in alias_regs:
+                    return
+                continue
+
+            # tbz/tbnz: bit-test branch. Only the sign-bit or bit-0 test on an
+            # alias would constitute a meaningful guard; conservatively treat
+            # any tbz/tbnz on an aliasing register as a guard so the scan stays
+            # silent on defensively-written code (false-negative bias preserves
+            # the zero-false-positive posture).
+            if insn.mnemonic in ("tbz", "tbnz"):
+                first = op.split(",", 1)[0].strip()
+                if first in alias_regs:
+                    return
+                continue
+
+            # cmp/tst on the slot or an alias, followed within a small window
+            # by a conditional branch, is a NULL-check guard.
+            if insn.mnemonic in ("cmp", "tst"):
+                touches_alias = any(
+                    re.search(rf"\b{re.escape(a)}\b", op) for a in alias_regs
+                )
+                if touches_alias:
+                    after = scan[i + 1: i + 6]
+                    if any(nx.mnemonic in cls._AARCH64_COND_BRANCHES for nx in after):
+                        return
+                continue
+
+            # A dereference through an aliasing register (non-frame base) is the
+            # unguarded use. Both stores (``str wzr, [x9]``) and loads (``ldr
+            # w0, [x9, #4]``) qualify; we report the first one.
+            md = cls._AARCH64_DEREF_BASE.search(op)
+            if md:
+                base = md.group(1)
+                if base not in cls._AARCH64_FRAME_REGS and base in alias_regs:
+                    results.append(
+                        {
+                            "address": insn.address,
+                            "function": func_name,
+                            "alloc_name": alloc_name,
+                            "alloc_address": alloc_address,
+                            "slot": slot,
+                        }
+                    )
+                    return
 
     @staticmethod
     def _widen(reg: str) -> str:

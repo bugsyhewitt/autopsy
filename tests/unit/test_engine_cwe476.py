@@ -280,8 +280,12 @@ def test_compare_on_other_register_is_not_a_guard():
     assert sites[0]["function"] == "wrong_guard"
 
 
-def test_returns_empty_on_non_amd64():
-    eng = _engine([_unchecked_malloc()], _SYMBOLS, arch_name="AARCH64")
+def test_returns_empty_on_unsupported_arch():
+    """On an architecture without a CWE-476 walker, the engine returns []."""
+    # The synthetic x86_64 fixture's mnemonics/regs are nonsense to the
+    # AArch64 walker — but more importantly, an arch that has no walker
+    # registered at all (e.g. MIPS) must produce zero findings.
+    eng = _engine([_unchecked_malloc()], _SYMBOLS, arch_name="MIPS32")
     assert eng.unchecked_alloc_dereferences() == []
 
 
@@ -312,6 +316,267 @@ def test_multiple_functions_each_unchecked_reported():
     eng = _engine(
         [_unchecked_malloc(0x404000, "a"), _unchecked_malloc(0x404100, "b")],
         _SYMBOLS,
+    )
+    sites = eng.unchecked_alloc_dereferences()
+    assert {s["function"] for s in sites} == {"a", "b"}
+
+
+# ---------------------------------------------------------------------------
+# AArch64 (AAPCS64) walker
+# ---------------------------------------------------------------------------
+#
+# The AArch64 synthetic instruction streams mirror -O0 clang codegen for an
+# `aarch64-linux-gnu` target (capstone AArch64 syntax):
+#
+#     unchecked:   bl <malloc> ; str x0, [sp] ; ldr x9, [sp]
+#                  ; str w8, [x9]            -> unchecked deref (CANDIDATE)
+#     cbz-guard:   bl <malloc> ; str x0, [sp] ; ldr x8, [sp]
+#                  ; cbnz x8, .L ; ...      -> NULL-check guard (NOT a candidate)
+#     cmp-guard:   bl <malloc> ; str x0, [sp] ; ldr x8, [sp]
+#                  ; cmp x8, #0 ; b.eq .L   -> NULL-check guard (NOT a candidate)
+
+
+def _aarch64_unchecked_malloc(base=0x501000, name="alloc_use"):
+    """bl malloc -> spill x0 -> reload -> store through it, no NULL-check."""
+    insns = [
+        _Insn(base + 0x0, "bl", hex(_MALLOC)),
+        _Insn(base + 0x4, "str", "x0, [sp]"),
+        _Insn(base + 0x8, "ldr", "x9, [sp]"),
+        _Insn(base + 0xC, "str", "w8, [x9]"),
+        _Insn(base + 0x10, "ret", ""),
+    ]
+    return _Func(base, name, insns)
+
+
+def _aarch64_cbz_guard(base=0x501100, name="safe_cbz"):
+    """bl malloc -> spill -> reload -> cbz on alias -> deref. Guarded."""
+    insns = [
+        _Insn(base + 0x0, "bl", hex(_MALLOC)),
+        _Insn(base + 0x4, "str", "x0, [sp]"),
+        _Insn(base + 0x8, "ldr", "x8, [sp]"),
+        _Insn(base + 0xC, "cbz", f"x8, {hex(base + 0x40)}"),
+        _Insn(base + 0x10, "ldr", "x9, [sp]"),
+        _Insn(base + 0x14, "str", "w8, [x9]"),
+        _Insn(base + 0x18, "ret", ""),
+    ]
+    return _Func(base, name, insns)
+
+
+def _aarch64_cmp_beq_guard(base=0x501200, name="safe_cmp"):
+    """bl malloc -> spill -> reload -> cmp x8,#0 ; b.eq -> deref. Guarded."""
+    insns = [
+        _Insn(base + 0x0, "bl", hex(_MALLOC)),
+        _Insn(base + 0x4, "str", "x0, [sp]"),
+        _Insn(base + 0x8, "ldr", "x8, [sp]"),
+        _Insn(base + 0xC, "cmp", "x8, #0"),
+        _Insn(base + 0x10, "b.eq", hex(base + 0x40)),
+        _Insn(base + 0x14, "ldr", "x9, [sp]"),
+        _Insn(base + 0x18, "str", "w8, [x9]"),
+        _Insn(base + 0x1C, "ret", ""),
+    ]
+    return _Func(base, name, insns)
+
+
+def test_aarch64_unchecked_malloc_deref_detected():
+    eng = _engine([_aarch64_unchecked_malloc()], _SYMBOLS, arch_name="AARCH64")
+    sites = eng.unchecked_alloc_dereferences()
+    assert len(sites) == 1
+    s = sites[0]
+    assert s["function"] == "alloc_use"
+    assert s["alloc_name"] == "malloc"
+    assert s["alloc_address"] == 0x501000
+    assert s["address"] == 0x501000 + 0xC
+    # `str x0, [sp]` (no offset) is normalized to slot key "sp+0".
+    assert s["slot"] == "sp+0"
+
+
+def test_aarch64_cbz_guard_not_flagged():
+    """cbz on an aliasing register is a direct NULL-check guard."""
+    eng = _engine([_aarch64_cbz_guard()], _SYMBOLS, arch_name="AARCH64")
+    assert eng.unchecked_alloc_dereferences() == []
+
+
+def test_aarch64_cbnz_guard_not_flagged():
+    """cbnz on an aliasing register is also a direct NULL-check guard."""
+    base = 0x501300
+    insns = [
+        _Insn(base + 0x0, "bl", hex(_MALLOC)),
+        _Insn(base + 0x4, "str", "x0, [sp]"),
+        _Insn(base + 0x8, "ldr", "x8, [sp]"),
+        _Insn(base + 0xC, "cbnz", f"x8, {hex(base + 0x18)}"),
+        _Insn(base + 0x10, "mov", "w0, #0xffffffff"),
+        _Insn(base + 0x14, "ret", ""),
+        _Insn(base + 0x18, "ldr", "x9, [sp]"),
+        _Insn(base + 0x1C, "str", "w8, [x9]"),
+        _Insn(base + 0x20, "ret", ""),
+    ]
+    eng = _engine([_Func(base, "safe_cbnz", insns)], _SYMBOLS, arch_name="AARCH64")
+    assert eng.unchecked_alloc_dereferences() == []
+
+
+def test_aarch64_cmp_beq_guard_not_flagged():
+    eng = _engine([_aarch64_cmp_beq_guard()], _SYMBOLS, arch_name="AARCH64")
+    assert eng.unchecked_alloc_dereferences() == []
+
+
+def test_aarch64_cmp_xzr_guard_not_flagged():
+    """cmp xR, xzr followed by b.eq is the zero-register form of the NULL check."""
+    base = 0x501400
+    insns = [
+        _Insn(base + 0x0, "bl", hex(_MALLOC)),
+        _Insn(base + 0x4, "str", "x0, [sp]"),
+        _Insn(base + 0x8, "ldr", "x8, [sp]"),
+        _Insn(base + 0xC, "cmp", "x8, xzr"),
+        _Insn(base + 0x10, "b.eq", hex(base + 0x40)),
+        _Insn(base + 0x14, "ldr", "x9, [sp]"),
+        _Insn(base + 0x18, "str", "w8, [x9]"),
+        _Insn(base + 0x1C, "ret", ""),
+    ]
+    eng = _engine([_Func(base, "safe_xzr", insns)], _SYMBOLS, arch_name="AARCH64")
+    assert eng.unchecked_alloc_dereferences() == []
+
+
+def test_aarch64_tst_branch_guard_not_flagged():
+    """tst xR, xR followed by b.eq is also a NULL-check guard form."""
+    base = 0x501500
+    insns = [
+        _Insn(base + 0x0, "bl", hex(_MALLOC)),
+        _Insn(base + 0x4, "str", "x0, [sp]"),
+        _Insn(base + 0x8, "ldr", "x8, [sp]"),
+        _Insn(base + 0xC, "tst", "x8, x8"),
+        _Insn(base + 0x10, "b.eq", hex(base + 0x40)),
+        _Insn(base + 0x14, "ldr", "x9, [sp]"),
+        _Insn(base + 0x18, "str", "w8, [x9]"),
+        _Insn(base + 0x1C, "ret", ""),
+    ]
+    eng = _engine([_Func(base, "safe_tst", insns)], _SYMBOLS, arch_name="AARCH64")
+    assert eng.unchecked_alloc_dereferences() == []
+
+
+def test_aarch64_x29_slot_tracked():
+    """str x0, [x29, #-8] / ldr xR, [x29, #-8] tracks an x29-anchored slot too."""
+    base = 0x501600
+    insns = [
+        _Insn(base + 0x0, "bl", hex(_MALLOC)),
+        _Insn(base + 0x4, "str", "x0, [x29, #-8]"),
+        _Insn(base + 0x8, "ldr", "x9, [x29, #-8]"),
+        _Insn(base + 0xC, "str", "w8, [x9]"),
+        _Insn(base + 0x10, "ret", ""),
+    ]
+    eng = _engine([_Func(base, "x29_slot", insns)], _SYMBOLS, arch_name="AARCH64")
+    sites = eng.unchecked_alloc_dereferences()
+    assert len(sites) == 1
+    assert sites[0]["slot"] == "x29-8"
+
+
+def test_aarch64_alias_register_copy_followed():
+    """A reg-copy of the reloaded result is followed to the deref."""
+    base = 0x501700
+    insns = [
+        _Insn(base + 0x0, "bl", hex(_MALLOC)),
+        _Insn(base + 0x4, "str", "x0, [sp, #0x8]"),
+        _Insn(base + 0x8, "ldr", "x9, [sp, #0x8]"),
+        _Insn(base + 0xC, "mov", "x10, x9"),
+        _Insn(base + 0x10, "str", "wzr, [x10]"),
+        _Insn(base + 0x14, "ret", ""),
+    ]
+    eng = _engine([_Func(base, "via_alias", insns)], _SYMBOLS, arch_name="AARCH64")
+    sites = eng.unchecked_alloc_dereferences()
+    assert len(sites) == 1
+    assert sites[0]["address"] == base + 0x10
+
+
+def test_aarch64_compare_on_other_register_is_not_a_guard():
+    """A cmp on an unrelated register does not guard the result -> flagged."""
+    base = 0x501800
+    insns = [
+        _Insn(base + 0x0, "bl", hex(_MALLOC)),
+        _Insn(base + 0x4, "str", "x0, [sp]"),
+        _Insn(base + 0x8, "cmp", "x2, #0"),     # unrelated register
+        _Insn(base + 0xC, "b.eq", hex(base + 0x40)),
+        _Insn(base + 0x10, "ldr", "x9, [sp]"),
+        _Insn(base + 0x14, "str", "w8, [x9]"),
+        _Insn(base + 0x18, "ret", ""),
+    ]
+    eng = _engine([_Func(base, "wrong_guard", insns)], _SYMBOLS, arch_name="AARCH64")
+    sites = eng.unchecked_alloc_dereferences()
+    assert len(sites) == 1
+    assert sites[0]["function"] == "wrong_guard"
+
+
+def test_aarch64_result_never_spilled_not_tracked():
+    """If x0 is never stored to a slot, stay conservative — no finding."""
+    base = 0x501900
+    insns = [
+        _Insn(base + 0x0, "bl", hex(_MALLOC)),
+        # x0 used directly without ever spilling to a stack slot.
+        _Insn(base + 0x4, "add", "sp, sp, #16"),
+        _Insn(base + 0x8, "ret", ""),
+    ]
+    eng = _engine([_Func(base, "no_spill", insns)], _SYMBOLS, arch_name="AARCH64")
+    assert eng.unchecked_alloc_dereferences() == []
+
+
+def test_aarch64_calloc_strdup_getenv_each_tracked():
+    """Every NULL-returning allocator in the set is tracked on AArch64."""
+    for stub, expected in ((_CALLOC, "calloc"), (_STRDUP, "strdup"), (_GETENV, "getenv")):
+        base = 0x502000
+        insns = [
+            _Insn(base + 0x0, "bl", hex(stub)),
+            _Insn(base + 0x4, "str", "x0, [sp]"),
+            _Insn(base + 0x8, "ldr", "x9, [sp]"),
+            _Insn(base + 0xC, "ldrb", "w0, [x9]"),
+            _Insn(base + 0x10, "ret", ""),
+        ]
+        eng = _engine([_Func(base, "use", insns)], _SYMBOLS, arch_name="AARCH64")
+        sites = eng.unchecked_alloc_dereferences()
+        assert len(sites) == 1, f"{expected} should be tracked"
+        assert sites[0]["alloc_name"] == expected
+
+
+def test_aarch64_frame_base_deref_is_not_a_finding():
+    """A memory access through sp/x29/fp is a spill/reload, not a heap deref."""
+    base = 0x502100
+    insns = [
+        _Insn(base + 0x0, "bl", hex(_MALLOC)),
+        _Insn(base + 0x4, "str", "x0, [sp]"),
+        # A frame-anchored access does not dereference the heap pointer.
+        _Insn(base + 0x8, "str", "wzr, [x29, #-4]"),
+        _Insn(base + 0xC, "ret", ""),
+    ]
+    eng = _engine([_Func(base, "frame_only", insns)], _SYMBOLS, arch_name="AARCH64")
+    assert eng.unchecked_alloc_dereferences() == []
+
+
+def test_aarch64_non_allocator_call_ignored():
+    """A `bl free` result is not an allocator and must not be tracked."""
+    base = 0x502200
+    insns = [
+        _Insn(base + 0x0, "bl", hex(_FREE)),
+        _Insn(base + 0x4, "str", "x0, [sp]"),
+        _Insn(base + 0x8, "ldr", "x9, [sp]"),
+        _Insn(base + 0xC, "str", "wzr, [x9]"),
+        _Insn(base + 0x10, "ret", ""),
+    ]
+    eng = _engine([_Func(base, "not_alloc", insns)], _SYMBOLS, arch_name="AARCH64")
+    assert eng.unchecked_alloc_dereferences() == []
+
+
+def test_aarch64_plt_and_simprocedure_skipped():
+    plt = _Func(0x503000, "malloc@plt",
+                [_Insn(0x503000, "bl", hex(_MALLOC))], is_plt=True)
+    sim = _Func(0x503100, "sim",
+                [_Insn(0x503100, "bl", hex(_MALLOC))], is_simprocedure=True)
+    eng = _engine([plt, sim], _SYMBOLS, arch_name="AARCH64")
+    assert eng.unchecked_alloc_dereferences() == []
+
+
+def test_aarch64_multiple_functions_each_unchecked_reported():
+    eng = _engine(
+        [_aarch64_unchecked_malloc(0x504000, "a"),
+         _aarch64_unchecked_malloc(0x504100, "b")],
+        _SYMBOLS,
+        arch_name="AARCH64",
     )
     sites = eng.unchecked_alloc_dereferences()
     assert {s["function"] for s in sites} == {"a", "b"}

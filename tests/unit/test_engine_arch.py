@@ -60,33 +60,38 @@ def test_amd64_runs_every_check():
 def test_aarch64_runs_only_arch_agnostic_checks():
     eng = _engine_for_arch("AARCH64")
     runnable, skipped = eng.checks_supported_on_arch([119, 190, 415, 416, 78, 787, 476])
-    # The arch-agnostic + arch-aware checks run on AArch64. CWE-119 is now
-    # arch-aware (its scaled-index buffer-access scanner knows the AArch64
-    # ldrsw/sxtw + add base+index + deref forms), as are CWE-415, CWE-416, and
-    # CWE-787 (the malloc+bulk-copy co-location heuristic; the length-arg
-    # immediate resolver knows the AAPCS64 `x2`/`w2` form).
-    assert runnable == [119, 190, 415, 416, 78, 787]
-    # The remaining x86_64-only register-level check (CWE-476 NULL-deref) is
-    # still skipped.
-    assert skipped == [476]
+    # All register-level checks are now arch-aware on AArch64 — CWE-476 was the
+    # last x86_64-only register-level check and now runs there too.
+    assert runnable == [119, 190, 415, 416, 78, 787, 476]
+    assert skipped == []
 
 
 def test_aarch64_runs_cwe732_permission_check():
     # CWE-732 is the arch-aware register-level check: it reads only an immediate
     # mode/mask out of the AAPCS64 argument register, so it runs on AArch64.
-    # CWE-787 is now arch-aware too (length immediate read from x2/w2).
-    # CWE-476 (NULL-deref) remains x86_64-only.
+    # CWE-787 is arch-aware (length immediate read from x2/w2). CWE-476
+    # NULL-deref is now arch-aware too (spill/reload/cbz/cmp guard on x0).
     eng = _engine_for_arch("AARCH64")
     runnable, skipped = eng.checks_supported_on_arch([732, 787, 78, 476])
-    assert runnable == [732, 787, 78]
-    assert skipped == [476]
+    assert runnable == [732, 787, 78, 476]
+    assert skipped == []
 
 
 def test_aarch64_partition_preserves_request_order():
     eng = _engine_for_arch("AARCH64")
     runnable, skipped = eng.checks_supported_on_arch([78, 476, 190, 787])
-    assert runnable == [78, 190, 787]
-    assert skipped == [476]
+    # CWE-476 is arch-aware now and stays in the runnable order.
+    assert runnable == [78, 476, 190, 787]
+    assert skipped == []
+
+
+def test_aarch64_skipped_is_empty_for_unknown_check_ids():
+    """A request for a CWE id that autopsy does not implement is skipped."""
+    eng = _engine_for_arch("AARCH64")
+    runnable, skipped = eng.checks_supported_on_arch([78, 999])
+    # CWE-999 is not in _ARCH_AGNOSTIC_CHECKS, so it is partitioned into skipped.
+    assert runnable == [78]
+    assert skipped == [999]
 
 
 def test_aarch64_cwe78_only_is_fully_runnable():
