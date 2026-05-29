@@ -778,6 +778,104 @@ class AngrEngine:
                 continue
         return False
 
+    # Division mnemonics whose divisor (the single explicit operand) can be zero
+    # at runtime. ``div``/``idiv`` raise #DE (SIGFPE) when the divisor is 0.
+    _DIV_MNEMONICS: frozenset[str] = frozenset({"div", "idiv"})
+
+    def divisions_with_unguarded_divisor(self) -> list[dict[str, Any]]:
+        """Find ``div``/``idiv`` sites whose divisor is a non-immediate, unguarded value.
+
+        x86_64 ``div``/``idiv`` take a single explicit operand — the divisor —
+        which is always a register or memory location (the instruction has no
+        immediate form). The CPU raises a divide-error (#DE → SIGFPE) when that
+        divisor is zero. A division is therefore a candidate CWE-369 site unless
+        the program *guards* the divisor with a zero-check before the divide.
+
+        For each division this method walks back through the instructions that
+        precede it in the same function and looks for a guard: a ``test`` or
+        ``cmp`` whose operand mentions the divisor register (or its widening),
+        followed by a conditional branch (``je``/``jz``/``jne``/``jnz``/``jbe``/
+        ``jb``/etc.). The presence of such a compare-and-branch on the divisor is
+        the classic ``if (d == 0) return;`` guard, so guarded sites are excluded
+        to preserve the zero-false-positive guarantee on well-written code.
+
+        Returns one dict per *unguarded* division:
+        ``{"address": int, "function": str, "divisor": str}``. The list is empty
+        on non-AMD64 targets — the divisor-register / guard reasoning relies on
+        x86_64 disassembly, so the check is x86_64 only (it is excluded from the
+        architecture-agnostic set and skipped on AArch64 upstream).
+        """
+        import re
+
+        if self.project.arch.name != "AMD64":
+            return []
+
+        # The divisor operand of div/idiv: a bare register (``rcx``/``ecx``) or a
+        # memory reference (``dword ptr [rbp-4]``). We extract the leading token
+        # for register operands; memory operands are reported verbatim.
+        reg_operand = re.compile(r"^(?:[a-z]+ ptr )?(?:[er][a-z0-9]+|[a-z]+l|[a-z]+x)$")
+        # A zero-check guard: cmp/test naming the divisor, then a conditional jump.
+        cond_jumps = {
+            "je", "jz", "jne", "jnz", "jbe", "jb", "ja", "jae",
+            "jle", "jl", "jg", "jge", "js", "jns",
+        }
+
+        cfg = self.cfg()
+        results: list[dict[str, Any]] = []
+        for func in cfg.kb.functions.values():
+            if getattr(func, "is_plt", False) or getattr(func, "is_simprocedure", False):
+                continue
+            insns: list[Any] = []
+            for block in func.blocks:
+                try:
+                    insns.extend(block.capstone.insns)
+                except Exception:  # pragma: no cover - defensive
+                    continue
+            insns.sort(key=lambda i: i.address)
+
+            for idx, insn in enumerate(insns):
+                if insn.mnemonic not in self._DIV_MNEMONICS:
+                    continue
+                divisor = insn.op_str.strip()
+                if not divisor:
+                    continue
+                # Divisor register aliases we look for in a preceding guard. For a
+                # memory divisor we match the whole operand string.
+                if reg_operand.match(divisor) and "[" not in divisor:
+                    aliases = {divisor, self._widen(divisor)}
+                else:
+                    aliases = {divisor}
+                if self._divisor_is_guarded(insns, idx, aliases, cond_jumps):
+                    continue
+                results.append(
+                    {
+                        "address": insn.address,
+                        "function": func.name,
+                        "divisor": divisor,
+                    }
+                )
+        return results
+
+    @staticmethod
+    def _divisor_is_guarded(insns, div_idx, aliases, cond_jumps) -> bool:
+        """True if a cmp/test on the divisor precedes the division with a branch.
+
+        Scans the instructions before ``insns[div_idx]`` (bounded window) for a
+        ``cmp``/``test`` that mentions a divisor alias and is followed — anywhere
+        before the division — by a conditional jump. That compare-and-branch is
+        the program's zero-check; its presence means the divisor is guarded.
+        """
+        window = insns[max(0, div_idx - 24): div_idx]
+        saw_compare_on_divisor = False
+        for ins in window:
+            if ins.mnemonic in ("cmp", "test") and any(
+                a in ins.op_str for a in aliases
+            ):
+                saw_compare_on_divisor = True
+            elif saw_compare_on_divisor and ins.mnemonic in cond_jumps:
+                return True
+        return False
+
     @staticmethod
     def _widen(reg: str) -> str:
         """Map a 32-bit sub-register name to its 64-bit form (edx -> rdx)."""
