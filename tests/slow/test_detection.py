@@ -160,6 +160,27 @@ def test_cwe134_detected(require_angr, fixtures_dir):
     assert "printf" in vuln[0]["evidence"]
 
 
+def test_cwe676_detected(require_angr, fixtures_dir):
+    # Use of potentially dangerous functions: the fixture calls gets(), strcpy()
+    # and sprintf(). The call-site-driven check must flag each.
+    rep = _analyze(fixtures_dir, "cwe676-vuln", "676")
+    d = rep.to_dict()
+    assert d["error"] is None
+    cwe676 = [f for f in d["findings"] if f["cwe"] == 676]
+    assert cwe676, f"expected CWE-676 findings, got {d['findings']}"
+    for f in cwe676:
+        _assert_finding_contract(f, 676)
+    targets = {f["evidence"].split("(")[0].split()[-1] for f in cwe676}
+    # gets/strcpy/sprintf must each appear in the evidence of some finding.
+    joined = " ".join(f["evidence"] for f in cwe676)
+    assert "gets" in joined, f"gets() not flagged: {cwe676}"
+    assert "strcpy" in joined, f"strcpy() not flagged: {cwe676}"
+    assert "sprintf" in joined, f"sprintf() not flagged: {cwe676}"
+    # gets() is the no-safe-usage case -> at least one high-confidence finding.
+    gets_findings = [f for f in cwe676 if "gets(" in f["evidence"]]
+    assert gets_findings and gets_findings[0]["confidence"] == "high"
+
+
 def test_cwe78_detected_on_aarch64(require_angr, fixtures_dir):
     # AArch64 (ARM64) support: the call-site-driven CWE-78 check must fire on a
     # `bl` (branch-with-link) call to system() fed by an fgets() source, exactly
@@ -217,6 +238,7 @@ def test_max_states_high_completes_all_fixtures(require_angr, fixtures_dir):
         ("cwe416-interproc-vuln", 416),
         ("cwe78-vuln", 78),
         ("cwe134-vuln", 134),
+        ("cwe676-vuln", 676),
         ("cwe787-vuln", 787),
     ]:
         rep = analyze(binary=str(fixtures_dir / name), checks_token=str(cwe),
