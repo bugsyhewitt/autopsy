@@ -349,6 +349,43 @@ def test_cwe78_detected_on_aarch64(require_angr, fixtures_dir):
     assert cwe78[0]["confidence"] == "medium"
 
 
+def test_cwe190_detected_on_aarch64(require_angr, fixtures_dir):
+    # AArch64 (ARM64) support for the arch-aware register-level CWE-190 check:
+    # the 32-bit size arithmetic (`lsl w8, w8, #0xc` for `count * 4096`) is found
+    # before the `bl malloc` call and paired with the attacker-input source
+    # (fgets/atoi), mirroring the x86_64 `shl eax, 0xc` behavior. One register
+    # source plus an immediate shift -> medium confidence, same as x86_64.
+    rep = _analyze(fixtures_dir, "cwe190-aarch64-vuln", "190")
+    d = rep.to_dict()
+    assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
+    cwe190 = [f for f in d["findings"] if f["cwe"] == 190]
+    assert cwe190, f"expected a CWE-190 finding on aarch64, got {d['findings']}"
+    _assert_finding_contract(cwe190[0], 190)
+    vuln = [f for f in cwe190 if f["function"] == "alloc_records"]
+    assert vuln, f"expected the overflow in alloc_records(), got {cwe190}"
+    # The fixture shifts a tainted count by a constant width (one symbolic
+    # operand) -> medium confidence, exactly as the x86_64 fixture reports.
+    assert vuln[0]["confidence"] == "medium"
+    # The arithmetic taint point names the AArch64 shift mnemonic.
+    assert any("lsl" in tp["description"] for tp in vuln[0]["taint_trace"]), (
+        f"expected the lsl size-arithmetic point in the trace: {vuln[0]}"
+    )
+
+
+def test_aarch64_runs_cwe190_under_all(require_angr, fixtures_dir):
+    # Under "all" on AArch64, CWE-190 runs (it is arch-agnostic / arch-aware and
+    # is not in the skipped set) and its findings surface.
+    rep = _analyze(fixtures_dir, "cwe190-aarch64-vuln", "all")
+    d = rep.to_dict()
+    assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
+    assert 190 not in d["skipped_checks"], (
+        f"CWE-190 should run on AArch64, but was skipped: {d['skipped_checks']}"
+    )
+    assert any(f["cwe"] == 190 for f in d["findings"]), (
+        f"expected CWE-190 findings under 'all' on aarch64: {d['findings']}"
+    )
+
+
 def test_cwe732_detected_on_aarch64(require_angr, fixtures_dir):
     # AArch64 (ARM64) support for the arch-aware register-level CWE-732 check:
     # the chmod/umask mode immediate is read out of the AAPCS64 argument

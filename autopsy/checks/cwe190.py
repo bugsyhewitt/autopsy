@@ -2,25 +2,27 @@
 
 Strategy (whole-program): locate every call to an allocator (``malloc``,
 ``calloc``, ``realloc``). For each, scan the basic block(s) leading up to the
-call within the same function for an arithmetic operation (``imul``/``mul``/
-``add``/``shl``/``lea`` with scale) that computes the size in a 32-bit
-register (``e**`` registers, which truncate/overflow). If the program also
-reads attacker-controlled input, the computed size is tainted and may overflow.
-The taint trace records input source, the arithmetic op, and the allocator call.
+call within the same function for an arithmetic operation that computes the size
+in a 32-bit register (which truncates/overflows). If the program also reads
+attacker-controlled input, the computed size is tainted and may overflow. The
+taint trace records input source, the arithmetic op, and the allocator call.
+
+Architecture-aware. The size-arithmetic discovery is delegated to
+:meth:`AngrEngine.size_arith_before_call`, which knows both the x86_64 forms
+(``imul``/``mul``/``add``/``shl``/``sal``/``lea`` over the ``e**``/``r**d``
+register views) and the AArch64 forms (``mul``/``madd``/``add``/``lsl`` over the
+``w0..w30`` view — e.g. ``count * width`` lowers to ``mul w8, w8, w9`` and
+``count * 4096`` to ``lsl w8, w8, #0xc``). The size register truncates to 32
+bits on both, which is the integer-overflow surface. The check therefore runs on
+both architectures; the engine helper returns nothing on any other.
 """
 
 from __future__ import annotations
-
-import re
 
 from autopsy.report import Finding, TaintPoint
 
 _ALLOCATORS = {"malloc", "calloc", "realloc", "reallocarray"}
 _SOURCES = {"fgets", "gets", "read", "scanf", "__isoc99_scanf", "atoi", "strtol", "atol"}
-# Arithmetic mnemonics that can overflow when producing a size.
-_ARITH = {"imul", "mul", "add", "shl", "sal", "lea"}
-# 32-bit registers whose results truncate to 32 bits (overflow surface).
-_E_REGS = ("eax", "ebx", "ecx", "edx", "esi", "edi", "ebp", "r8d", "r9d", "r10d", "r11d")
 
 
 def run(engine) -> list[Finding]:
@@ -31,12 +33,11 @@ def run(engine) -> list[Finding]:
     if not source_calls:
         return []
 
-    cfg = engine.cfg()
     findings: list[Finding] = []
     src = source_calls[0]
 
     for call in alloc_calls:
-        arith = _arith_before_call(engine, cfg, call)
+        arith = engine.size_arith_before_call(call)
         if arith is None:
             continue
         arith_addr, arith_mnemonic, two_reg_operands = arith
@@ -73,39 +74,3 @@ def run(engine) -> list[Finding]:
             )
         )
     return findings
-
-
-# Count of register operands in an arithmetic op decides confidence.
-_E_REGS_RE = re.compile(
-    r"\b(?:eax|ebx|ecx|edx|esi|edi|ebp|esp|r8d|r9d|r10d|r11d|r12d|r13d|r14d|r15d)\b"
-)
-
-
-def _arith_before_call(engine, cfg, call):
-    """Return ``(addr, mnemonic, two_reg_operands)`` of the last overflow-prone
-    32-bit arithmetic op in the basic block containing ``call``, or None.
-
-    ``two_reg_operands`` is True when the arithmetic op has two register
-    operands (both potentially tainted) rather than a register/immediate pair.
-    """
-    func = cfg.kb.functions.get(call.caller_function)
-    if func is None:
-        # Fall back to searching by address.
-        func = cfg.kb.functions.floor_func(call.call_address)
-    if func is None:
-        return None
-    candidate = None
-    for block in func.blocks:
-        try:
-            insns = block.capstone.insns
-        except Exception:  # pragma: no cover - defensive
-            continue
-        for insn in insns:
-            if insn.address >= call.call_address:
-                continue
-            if insn.mnemonic in _ARITH and any(
-                reg in insn.op_str for reg in _E_REGS
-            ):
-                two_reg = len(_E_REGS_RE.findall(insn.op_str)) >= 2
-                candidate = (insn.address, insn.mnemonic, two_reg)
-    return candidate

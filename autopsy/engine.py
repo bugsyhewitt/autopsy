@@ -107,7 +107,7 @@ class AngrEngine:
     # kinds qualify:
     #
     # (a) Purely call-site-driven checks (call-graph + import symbol
-    #     resolution). CWE-78/190 resolve direct calls by symbol name; CWE-676
+    #     resolution). CWE-78 resolves direct calls by symbol name; CWE-676
     #     (dangerous-function use), CWE-377 (insecure temporary file), CWE-338
     #     (weak-PRNG use) and CWE-367 (TOCTOU check->use) are the same shape —
     #     they pair/flag calls by name and never inspect registers, so they are
@@ -119,7 +119,11 @@ class AngrEngine:
     #     helpers know both the SysV/x86_64 and the AArch64 PCS argument
     #     registers and the per-arch immediate-move encoding, so the check is
     #     sound on AArch64 too (see ``chmod_calls_with_permissive_mode`` /
-    #     ``umask_calls_with_permissive_mask``).
+    #     ``umask_calls_with_permissive_mask``). CWE-190 (integer overflow into
+    #     an allocator size) inspects the 32-bit size-arithmetic register before
+    #     the allocator call; ``size_arith_before_call`` knows both the x86_64
+    #     (imul/shl over e**/r**d) and AArch64 (mul/lsl over w0..w30) forms, so
+    #     it is sound on AArch64 too.
     #
     # The remaining register-level checks (CWE-119/415/416/476/134/787/369)
     # still rely on x86_64 stack-slot/alias conventions and are skipped on
@@ -1001,6 +1005,120 @@ class AngrEngine:
             num = reg[1:]
             return f"x{num}" in aliases or f"w{num}" in aliases
         return False
+
+    # -- CWE-190 size-arithmetic discovery (arch-aware) -------------------
+
+    # Overflow-prone arithmetic mnemonics by architecture. On x86_64 a size is
+    # computed with imul/mul/add/shl/sal or an lea-with-scale; on AArch64 the
+    # same shapes are mul/madd/add and lsl (shift-left == multiply by a power of
+    # two). All operate here on the 32-bit register view, which truncates and so
+    # is the integer-overflow surface CWE-190 looks for.
+    _SIZE_ARITH_MNEMONICS: dict[str, frozenset[str]] = {
+        "AMD64": frozenset({"imul", "mul", "add", "shl", "sal", "lea"}),
+        "AARCH64": frozenset({"mul", "madd", "add", "lsl"}),
+    }
+
+    # 32-bit register tokens whose arithmetic results truncate to 32 bits — the
+    # overflow surface. x86_64: the e** / r**d views. AArch64: the w0..w30 view
+    # (a w-write zero-extends into the x register, dropping the high 32 bits).
+    _SIZE_ARITH_E_REGS: tuple[str, ...] = (
+        "eax", "ebx", "ecx", "edx", "esi", "edi", "ebp",
+        "r8d", "r9d", "r10d", "r11d", "r12d", "r13d", "r14d", "r15d",
+    )
+
+    def size_arith_before_call(self, call: "CallSite") -> tuple[int, str, bool] | None:
+        """Find the last overflow-prone 32-bit size arithmetic before ``call``.
+
+        Scans the basic blocks of the function containing the allocator call
+        ``call`` for the last arithmetic instruction that computes a value in a
+        32-bit register (the truncation/overflow surface) before the call. This
+        is the engine half of the CWE-190 (integer-overflow-into-allocator-size)
+        heuristic — :mod:`autopsy.checks.cwe190` pairs it with an attacker-input
+        source to flag a tainted, potentially-overflowing allocation size.
+
+        Returns ``(address, mnemonic, two_reg_operands)`` for that arithmetic op,
+        or ``None`` if no overflow-prone arithmetic precedes the call.
+        ``two_reg_operands`` is True when the op combines two distinct register
+        *source* operands (both potentially tainted, data-dependent values that
+        can overflow together) rather than a register/immediate pair; the check
+        maps that to "high" vs "medium" confidence.
+
+        Architecture-aware. On x86_64 the arithmetic is imul/mul/add/shl/sal/lea
+        over the e**/r**d register views (e.g. ``imul eax, ecx`` / ``shl eax,
+        0x2``). On AArch64 it is mul/madd/add/lsl over the w0..w30 view (e.g.
+        ``mul w8, w8, w9`` — two registers, high — or ``lsl w8, w8, #0xc`` — a
+        register and an immediate shift, medium). Returns ``None`` on any other
+        architecture.
+        """
+        import re
+
+        arch = self.project.arch.name
+        mnemonics = self._SIZE_ARITH_MNEMONICS.get(arch)
+        if mnemonics is None:
+            return None
+
+        cfg = self.cfg()
+        func = cfg.kb.functions.get(call.caller_function)
+        if func is None:
+            try:
+                func = cfg.kb.functions.floor_func(call.call_address)
+            except Exception:  # pragma: no cover - defensive
+                func = None
+        if func is None:
+            return None
+
+        if arch == "AARCH64":
+            # w0..w30 (and the zero register wzr, which never carries a size).
+            reg_re = re.compile(r"\bw(?:[12]?[0-9]|30)\b")
+        else:
+            reg_re = re.compile(
+                r"\b(?:eax|ebx|ecx|edx|esi|edi|ebp|esp|"
+                r"r8d|r9d|r10d|r11d|r12d|r13d|r14d|r15d)\b"
+            )
+
+        candidate: tuple[int, str, bool] | None = None
+        for block in func.blocks:
+            try:
+                insns = block.capstone.insns
+            except Exception:  # pragma: no cover - defensive
+                continue
+            for insn in insns:
+                if insn.address >= call.call_address:
+                    continue
+                if insn.mnemonic not in mnemonics:
+                    continue
+                if not reg_re.search(insn.op_str):
+                    continue
+                two_reg = self._size_arith_two_source_regs(
+                    arch, insn.op_str, reg_re
+                )
+                candidate = (insn.address, insn.mnemonic, two_reg)
+        return candidate
+
+    @staticmethod
+    def _size_arith_two_source_regs(arch: str, op_str: str, reg_re) -> bool:
+        """True if a size-arithmetic op combines two distinct register sources.
+
+        The destination register is excluded so a self-referential op such as
+        ``shl eax, 0x2`` / ``lsl w8, w8, #0xc`` (one logical source plus an
+        immediate) is counted as a single register operand (-> medium), while
+        ``imul eax, ecx`` / ``mul w8, w8, w9`` (two distinct data-dependent
+        sources) counts as two (-> high). On AArch64 the first operand is always
+        the destination; on x86_64 the first operand is both source and
+        destination, so it is still a source and is retained.
+        """
+        operands = [o.strip() for o in op_str.split(",")]
+        regs = [reg_re.search(o).group(0) for o in operands if reg_re.search(o)]
+        if not regs:
+            return False
+        if arch == "AARCH64":
+            # `mnemonic dst, src1, src2` — drop the destination, count the rest.
+            sources = regs[1:]
+        else:
+            # x86_64 `mnemonic dst/src1, src2` — the destination is also a
+            # source operand, so every register token is a source.
+            sources = regs
+        return len(set(sources)) >= 2
 
     def umask_calls_with_permissive_mask(self) -> list[dict[str, Any]]:
         """Find ``umask`` calls whose immediate mask fails to mask group/other write.

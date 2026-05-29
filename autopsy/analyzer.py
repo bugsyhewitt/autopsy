@@ -57,8 +57,9 @@ def analyze(
         if callable(pass_fn):
             pass_fn()
         # Partition the requested checks by architecture support. On x86_64 all
-        # run; on AArch64 only the call-site-driven checks (CWE-78/190) run and
-        # the register-level checks are skipped (recorded, not silently dropped).
+        # run; on AArch64 the call-site-driven checks plus the arch-aware
+        # register-level checks (CWE-732, CWE-190) run and the x86_64-only
+        # register-level checks are skipped (recorded, not silently dropped).
         # Unit-test engines without this method run every requested check.
         partition = getattr(engine, "checks_supported_on_arch", None)
         if callable(partition):
