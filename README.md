@@ -17,7 +17,7 @@ design.
 
 > **Scope:** ELF only. Full check coverage on x86_64; the call-site-driven
 > checks (CWE-78/338/367/377/676) plus the arch-aware register-level checks
-> (CWE-732, CWE-190, CWE-134) also run on AArch64. See
+> (CWE-732, CWE-190, CWE-134, CWE-415) also run on AArch64. See
 > [Architecture support](#architecture-support) and
 > [What autopsy is not](#what-autopsy-is-not).
 
@@ -172,7 +172,7 @@ never written from, nor applied to, a half-finished run.
 | Architecture | Checks that run |
 |---|---|
 | **x86_64 (AMD64)** | all checks (CWE-119, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787) |
-| **AArch64 (ARM64)** | the call-site-driven checks (**CWE-78**, **CWE-338**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**, **CWE-134**) |
+| **AArch64 (ARM64)** | the call-site-driven checks (**CWE-78**, **CWE-338**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**, **CWE-134**, **CWE-415**) |
 
 On an AArch64 target, the **CWE-732** permission check runs natively: its register
 reasoning only reads a single mode/mask *immediate* out of the AAPCS64 argument
@@ -188,21 +188,28 @@ argument out of the AAPCS64 register (`x0` for `printf`, `x1` for
 `fprintf`/`sprintf`/`syslog`, `x2` for `snprintf`) and recognizes both the x86_64
 rodata-literal form (`lea reg, [rip+disp]`) and the AArch64 one (`adrp`/`adr`); a
 stack-slot reload (`ldr x0, [sp, #N]`) is the non-literal/attacker-controlled
-format, so it runs on AArch64 too. The remaining register-level checks
-(CWE-119/369/415/416/476/787) rely on x86_64 stack-slot/register conventions,
-so they are **skipped** rather than producing unsound results. Skipped checks are
-listed in the report's `skipped_checks` array and noted on stderr:
+format, so it runs on AArch64 too. The **CWE-415** intra-procedural double-free
+check is arch-aware as well: it tracks the allocator return register into a
+stack slot and the first-argument register handed to two successive `free`
+calls, and the scanner knows both the x86_64 form (`rax`/`rdi`; `mov` slot
+store/reload over `[rbp-N]`/`[rsp-N]`) and the AArch64 one (`x0`; `str`/`ldr`
+over `[sp,#N]`/`[x29,#N]`), so it runs on AArch64 too. (Its single-hop
+interprocedural companion pass remains x86_64-only and simply reports nothing on
+AArch64.) The remaining register-level checks (CWE-119/369/416/476/787) rely on
+x86_64 stack-slot/register conventions, so they are **skipped** rather than
+producing unsound results. Skipped checks are listed in the report's
+`skipped_checks` array and noted on stderr:
 
 ```bash
 autopsy --binary ./arm64-target --checks all
-# stderr: note: skipped CWE-119, CWE-369, CWE-415, CWE-416, CWE-476, CWE-787 (not supported on this target's architecture)
+# stderr: note: skipped CWE-119, CWE-369, CWE-416, CWE-476, CWE-787 (not supported on this target's architecture)
 ```
 
 ```json
 {
   "checks": [119, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787],
-  "skipped_checks": [119, 369, 415, 416, 476, 787],
-  "findings": [ /* CWE-78 / 134 / 190 / 338 / 367 / 377 / 676 / 732 findings */ ]
+  "skipped_checks": [119, 369, 416, 476, 787],
+  "findings": [ /* CWE-78 / 134 / 190 / 338 / 367 / 377 / 415 / 676 / 732 findings */ ]
 }
 ```
 
@@ -374,8 +381,15 @@ autopsy --binary tests/fixtures/cwe415-interproc-vuln --checks 415 --format json
 }
 ```
 
-> Both CWE-415 passes use x86_64 register/stack-slot conventions and run on
-> x86_64 (AMD64) targets only; on AArch64 the register-level checks are skipped.
+> The **intra-procedural** pass is **arch-aware: it runs on both x86_64 and
+> AArch64.** The scanner tracks the allocator return register and the
+> first-argument register handed to two successive `free` calls, and knows both
+> the x86_64 form (`rax`/`rdi`; `mov` slot store/reload over
+> `[rbp-N]`/`[rsp-N]`) and the AArch64 one (`x0`; `str`/`ldr` over
+> `[sp,#N]`/`[x29,#N]`); the `tests/fixtures/cwe415-aarch64-vuln` ARM64 fixture
+> exercises it. The **single-hop interprocedural** pass still uses x86_64
+> register/stack-slot conventions and runs on x86_64 (AMD64) targets only; on
+> AArch64 it simply reports nothing.
 
 ### CWE-416 — use-after-free (intra-procedural and single-hop interprocedural)
 

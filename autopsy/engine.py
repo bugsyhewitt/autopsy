@@ -131,9 +131,18 @@ class AngrEngine:
     #     ``adrp``/``adr``, stack reload via ``ldr``) forms, so it is sound on
     #     AArch64 too.
     #
-    # The remaining register-level checks (CWE-119/415/416/476/787/369) still
-    # rely on x86_64 stack-slot/alias conventions and are skipped on AArch64.
-    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 134, 190, 338, 367, 377, 676, 732)
+    #     too. CWE-415 (double-free, intra-procedural) tracks the allocator's
+    #     return register into a stack slot and the first-argument register
+    #     handed to two successive ``free`` calls; the intra-procedural scanner
+    #     in ``checks/cwe415.py`` knows both the x86_64 (``rax``/``rdi``; ``mov``
+    #     slot store/reload over ``[rbp-N]``/``[rsp-N]``) and the AArch64
+    #     (``x0``; ``str``/``ldr`` over ``[sp,#N]``/``[x29,#N]``) forms, so it is
+    #     sound on AArch64 too. (Its single-hop interprocedural companion pass
+    #     remains x86_64-only and simply reports nothing on AArch64.)
+    #
+    # The remaining register-level checks (CWE-119/416/476/787/369) still rely
+    # on x86_64 stack-slot/alias conventions and are skipped on AArch64.
+    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 134, 190, 338, 367, 377, 415, 676, 732)
 
     def assert_supported(self) -> None:
         """Reject targets on architectures autopsy cannot analyze.
@@ -141,9 +150,10 @@ class AngrEngine:
         x86_64 (AMD64) is fully supported. AArch64 (ARM64) is supported for the
         arch-agnostic checks — the call-site-driven ones (CWE-78/338/367/377/
         676) and the arch-aware register-level checks (CWE-190 integer overflow,
-        CWE-732 permission assignment, CWE-134 uncontrolled format string); the
-        remaining register-level checks (CWE-119/415/416/476/787/369) use x86_64
-        register conventions and report no findings on AArch64 — see
+        CWE-732 permission assignment, CWE-134 uncontrolled format string,
+        CWE-415 double-free); the remaining register-level checks
+        (CWE-119/416/476/787/369) use x86_64 register conventions and report no
+        findings on AArch64 — see
         :meth:`checks_supported_on_arch`.
         """
         arch_name = self.project.arch.name
