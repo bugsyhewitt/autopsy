@@ -176,14 +176,126 @@ def test_unresolved_length_is_not_literal():
 # ---------------------------------------------------------------------------
 
 
-def test_non_amd64_returns_false():
+def test_unsupported_arch_returns_false():
+    # A non-AMD64/non-AArch64 architecture has no length-register map.
     func = _Func("f", _insns([
-        (0x700, "mov", "x2, 0x3f"),
+        (0x700, "mov", "r2, 0x3f"),
         (0x704, "bl", "#0x401050"),
     ]))
-    eng = _engine("AARCH64", [func])
-    # AArch64 is not handled (register checks are arch-gated upstream).
+    eng = _engine("X86", [func])
     assert eng.copy_call_length_is_literal("f", 0x704, "memcpy") is False
+
+
+# ---------------------------------------------------------------------------
+# AArch64 (AAPCS64): length argument in x2 / w2
+# ---------------------------------------------------------------------------
+
+
+def test_aarch64_immediate_length_is_literal():
+    # strncpy(p, line, 63): mov w2, #0x3f ; bl strncpy -> literal.
+    func = _Func("main", _insns([
+        (0x100, "mov", "w2, #0x3f"),
+        (0x104, "mov", "x1, x20"),
+        (0x108, "mov", "x0, x19"),
+        (0x10c, "bl", "#0x401040"),
+    ]))
+    eng = _engine("AARCH64", [func])
+    assert eng.copy_call_length_is_literal("main", 0x10c, "strncpy") is True
+
+
+def test_aarch64_decimal_immediate_length_is_literal():
+    func = _Func("f", _insns([
+        (0x200, "mov", "w2, #16"),
+        (0x204, "bl", "#0x401050"),
+    ]))
+    eng = _engine("AARCH64", [func])
+    assert eng.copy_call_length_is_literal("f", 0x204, "memcpy") is True
+
+
+def test_aarch64_zero_register_length_is_literal():
+    # memset(buf, 0, 0): mov w2, wzr -> a literal-0 length.
+    func = _Func("f", _insns([
+        (0x280, "mov", "w2, wzr"),
+        (0x284, "bl", "#0x401050"),
+    ]))
+    eng = _engine("AARCH64", [func])
+    assert eng.copy_call_length_is_literal("f", 0x284, "memset") is True
+
+
+def test_aarch64_immediate_through_register_copy_is_literal():
+    # mov w8, #0x10 ; mov w2, w8 ; bl memcpy -> literal via alias chain.
+    func = _Func("f", _insns([
+        (0x300, "mov", "w8, #0x10"),
+        (0x304, "mov", "w2, w8"),
+        (0x308, "bl", "#0x401050"),
+    ]))
+    eng = _engine("AARCH64", [func])
+    assert eng.copy_call_length_is_literal("f", 0x308, "memcpy") is True
+
+
+def test_aarch64_stack_slot_length_is_not_literal():
+    # memcpy(buf, src, length): ldr w2, [x29, #0x1c] reloads a tainted slot.
+    func = _Func("copy_to_heap", _insns([
+        (0x400, "ldr", "w2, [x29, #0x1c]"),
+        (0x404, "mov", "x1, x20"),
+        (0x408, "mov", "x0, x19"),
+        (0x40c, "bl", "#0x401050"),
+    ]))
+    eng = _engine("AARCH64", [func])
+    assert eng.copy_call_length_is_literal("copy_to_heap", 0x40c, "memcpy") is False
+
+
+def test_aarch64_ldur_length_is_not_literal():
+    # An unscaled load (ldur) of the length is equally non-literal.
+    func = _Func("f", _insns([
+        (0x480, "ldur", "w2, [x29, #-0x8]"),
+        (0x484, "bl", "#0x401050"),
+    ]))
+    eng = _engine("AARCH64", [func])
+    assert eng.copy_call_length_is_literal("f", 0x484, "memcpy") is False
+
+
+def test_aarch64_ldursw_length_is_not_literal():
+    # Real -O0 codegen for an `int` length widened to 64 bits:
+    #   ldursw x2, [x29, #-0x8] ; bl memcpy  -> reloaded slot -> non-literal.
+    func = _Func("copy_to_heap", _insns([
+        (0x4a0, "ldur", "x0, [x29, #-0x10]"),
+        (0x4a4, "ldursw", "x2, [x29, #-0x8]"),
+        (0x4a8, "bl", "#0x401050"),
+    ]))
+    eng = _engine("AARCH64", [func])
+    assert eng.copy_call_length_is_literal("copy_to_heap", 0x4a8, "memcpy") is False
+
+
+def test_aarch64_x_view_immediate_length_is_literal():
+    # Real -O0 codegen for a literal length materializes into the x-view:
+    #   mov x2, #0x3f ; bl strncpy  -> literal.
+    func = _Func("safe_copy", _insns([
+        (0x4c0, "ldr", "x0, [sp]"),
+        (0x4c4, "ldr", "x1, [sp, #0x8]"),
+        (0x4c8, "mov", "x2, #0x3f"),
+        (0x4cc, "bl", "#0x401060"),
+    ]))
+    eng = _engine("AARCH64", [func])
+    assert eng.copy_call_length_is_literal("safe_copy", 0x4cc, "strncpy") is True
+
+
+def test_aarch64_strcpy_has_no_length_arg_never_literal():
+    func = _Func("f", _insns([
+        (0x500, "mov", "w2, #0x3f"),  # unrelated w2 set
+        (0x504, "bl", "#0x401060"),
+    ]))
+    eng = _engine("AARCH64", [func])
+    assert eng.copy_call_length_is_literal("f", 0x504, "strcpy") is False
+
+
+def test_aarch64_unresolved_length_is_not_literal():
+    func = _Func("f", _insns([
+        (0x600, "nop", ""),
+        (0x601, "bl", "#0x401050"),
+    ]))
+    eng = _engine("AARCH64", [func])
+    assert eng.copy_call_length_is_literal("f", 0x601, "memcpy") is False
 
 
 def test_missing_function_returns_false():

@@ -161,9 +161,17 @@ class AngrEngine:
     #     single-hop interprocedural companion pass remains x86_64-only and
     #     reports nothing on AArch64.)
     #
-    # The remaining register-level checks (CWE-119/476/787) still rely on
-    # x86_64 stack-slot/alias conventions and are skipped on AArch64.
-    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 134, 190, 338, 367, 369, 377, 415, 416, 676, 732)
+    #   - CWE-787 (out-of-bounds write): the malloc+copy co-location heuristic in
+    #     ``checks/cwe787.py`` is call-site driven (arch-agnostic); its only
+    #     register-level dependency is ``copy_call_length_is_literal``, which
+    #     knows both the x86_64 (``rdx``/``edx``; ``mov``/``movsxd`` immediate vs
+    #     ``[rbp-N]`` reload) and the AArch64 (``x2``/``w2``; ``mov w2, #imm``
+    #     immediate vs ``ldr w2, [sp/x29 +N]`` reload) length-argument forms, so
+    #     it is sound on AArch64 too.
+    #
+    # The remaining register-level checks (CWE-119/476) still rely on x86_64
+    # stack-slot/alias conventions and are skipped on AArch64.
+    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 134, 190, 338, 367, 369, 377, 415, 416, 676, 732, 787)
 
     def assert_supported(self) -> None:
         """Reject targets on architectures autopsy cannot analyze.
@@ -172,10 +180,10 @@ class AngrEngine:
         arch-agnostic checks — the call-site-driven ones (CWE-78/338/367/377/
         676) and the arch-aware register-level checks (CWE-190 integer overflow,
         CWE-732 permission assignment, CWE-134 uncontrolled format string,
-        CWE-415 double-free, CWE-416 use-after-free, CWE-369 divide-by-zero);
-        the remaining register-level checks (CWE-119/476/787) use x86_64
-        register conventions and report no findings on AArch64 — see
-        :meth:`checks_supported_on_arch`.
+        CWE-415 double-free, CWE-416 use-after-free, CWE-369 divide-by-zero,
+        CWE-787 out-of-bounds write); the remaining register-level checks
+        (CWE-119/476) use x86_64 register conventions and report no findings on
+        AArch64 — see :meth:`checks_supported_on_arch`.
         """
         arch_name = self.project.arch.name
         if arch_name not in self.SUPPORTED_ARCHS:
@@ -837,6 +845,32 @@ class AngrEngine:
         "bcopy": "rdx",     # bcopy(src, dst, n)
     }
 
+    # The same bulk-copy sinks mapped to the AArch64 AAPCS64 argument register
+    # that carries their *length* (byte-count). AAPCS64 passes the first integer
+    # arguments in x0, x1, x2, ...; every sink here takes the length at the same
+    # third-argument position as on SysV, so it arrives in x2. A small length
+    # literal is materialized by -O0 into the 32-bit w-view (``mov w2, #0x3f``),
+    # which zero-extends into x2; the 64-bit x-name is recorded so register-copy
+    # aliasing through either view is followed. ``bcopy(src, dst, n)`` also takes
+    # the length third (x2). ``strcpy`` is absent (no explicit length).
+    _COPY_SINK_LEN_REG_AARCH64: dict[str, str] = {
+        "memcpy": "x2",     # memcpy(dst, src, n)
+        "memmove": "x2",    # memmove(dst, src, n)
+        "memset": "x2",     # memset(dst, c, n)
+        "strncpy": "x2",    # strncpy(dst, src, n)
+        "strncat": "x2",    # strncat(dst, src, n)
+        "bcopy": "x2",      # bcopy(src, dst, n)
+    }
+
+    def _copy_sink_len_reg_map(self) -> dict[str, str] | None:
+        """Per-arch bulk-copy length-register map, or ``None`` if unsupported."""
+        arch = self.project.arch.name
+        if arch == "AMD64":
+            return self._COPY_SINK_LEN_REG
+        if arch == "AARCH64":
+            return self._COPY_SINK_LEN_REG_AARCH64
+        return None
+
     def copy_call_length_is_literal(
         self, caller_function: str, call_address: int, sink_name: str
     ) -> bool:
@@ -845,41 +879,31 @@ class AngrEngine:
         For a copy/fill call (``memcpy``/``memmove``/``memset``/``strncpy``/
         ``strncat``/``bcopy``) in ``caller_function`` at ``call_address``, walk
         back from the call and resolve how the length-argument register (``rdx``
-        on x86_64 SysV) was last set. If it was set by an immediate move
-        (``mov rdx, 0x3f``) the copy length is a fixed compile-time constant and
-        therefore *cannot* be attacker-controlled — such a call cannot produce a
-        tainted out-of-bounds heap write, so the CWE-787 co-location heuristic
-        must not flag on it.
+        on x86_64 SysV; ``x2`` on AArch64 AAPCS64) was last set. If it was set by
+        an immediate move (``mov rdx, 0x3f`` / ``mov w2, #0x3f``) the copy length
+        is a fixed compile-time constant and therefore *cannot* be
+        attacker-controlled — such a call cannot produce a tainted out-of-bounds
+        heap write, so the CWE-787 co-location heuristic must not flag on it.
 
         Returns ``True`` only when the length is provably an immediate. If the
         length comes from a stack slot, a register, or cannot be resolved, the
         method returns ``False`` (conservative: treat as possibly-tainted).
         ``strcpy`` (no length argument) always returns ``False``.
 
-        x86_64 only: the length-argument register mapping uses the SysV calling
-        convention. On non-AMD64 targets this returns ``False`` (the register
-        checks are arch-gated upstream and the heuristic stays conservative).
+        x86_64 (AMD64) and AArch64 (ARM64): the length-argument register mapping
+        is per-architecture (SysV ``rdx`` on x86_64; AAPCS64 ``x2``/``w2`` on
+        AArch64) and the immediate/aliasing tracking handles both the x86_64
+        ``mov rdx, 0x3f`` form and the AArch64 ``mov w2, #0x3f`` form. On any
+        other architecture this returns ``False`` (conservative).
         """
         import re
 
-        if self.project.arch.name != "AMD64":
+        len_reg_for_sink = self._copy_sink_len_reg_map()
+        if len_reg_for_sink is None:
             return False
-        len_reg = self._COPY_SINK_LEN_REG.get(sink_name)
+        len_reg = len_reg_for_sink.get(sink_name)
         if len_reg is None:
             return False
-
-        # 32-bit sub-register alias: edx writes zero-extend into rdx, and -O0
-        # codegen materializes a small literal length as `mov edx, 0x3f`.
-        len_aliases = {len_reg, "e" + len_reg[1:]}
-
-        # reg <- immediate: a compile-time constant length.
-        mov_imm = re.compile(r"^(r[a-z0-9]+|e[a-z0-9]+),\s*(?:0x[0-9a-f]+|\d+)$")
-        # reg <- reg: a register copy (alias propagation).
-        reg_copy = re.compile(r"^(r[a-z0-9]+|e[a-z0-9]+),\s*(r[a-z0-9]+|e[a-z0-9]+)$")
-        # reg <- [rbp/rsp +/- N]: a stack-slot reload (non-literal / possibly tainted).
-        load_slot = re.compile(
-            r"^(r[a-z0-9]+|e[a-z0-9]+),\s*(?:[a-z]+ ptr )?\[(rbp|rsp)\s*[+\-]"
-        )
 
         cfg = self.cfg()
         func = None
@@ -903,6 +927,63 @@ class AngrEngine:
         )
         if call_idx is None:
             return False
+
+        if self.project.arch.name == "AARCH64":
+            # AArch64 (AAPCS64). The length literal is materialized into the
+            # 32-bit w-view (which zero-extends into x2); track both views.
+            base = len_reg[1:]  # "x2" -> "2"
+            len_aliases = {f"x{base}", f"w{base}"}
+            # reg <- #imm: `mov w2, #0x3f` / `mov w2, #63`.
+            mov_imm = re.compile(r"^([wx][0-9a-z]+),\s*#((?:0x[0-9a-f]+)|\d+)$")
+            # reg <- wzr/xzr: the zero register encodes a literal 0 length.
+            mov_zr = re.compile(r"^([wx][0-9a-z]+),\s*([wx]zr)$")
+            # reg <- reg: a register copy (alias propagation).
+            reg_copy = re.compile(r"^([wx][0-9a-z]+),\s*([wx][0-9a-z]+)$")
+            # reg <- [mem]: a load from a stack slot/memory (runtime length).
+            load_mem = re.compile(r"^([wx][0-9a-z]+),\s*\[")
+            # The stack-slot/memory load mnemonics -O0 uses to reload a spilled
+            # length: plain/unscaled loads plus the sign/zero-extending narrow
+            # forms (`ldursw x2, [x29, #-0x8]` for an `int` length widened to
+            # 64 bits, `ldrsw`, `ldrb`/`ldrh` and their unscaled `ldur*` peers).
+            mov_like = {
+                "mov", "movz",
+                "ldr", "ldur",
+                "ldrb", "ldrh", "ldrsb", "ldrsh", "ldrsw",
+                "ldurb", "ldurh", "ldursb", "ldursh", "ldursw",
+            }
+            for prev in reversed(insns[max(0, call_idx - 12): call_idx]):
+                if prev.mnemonic not in mov_like:
+                    continue
+                mi = mov_imm.match(prev.op_str)
+                if mi and self._aarch64_reg_in(mi.group(1), len_aliases):
+                    return True  # length set from an immediate -> literal
+                mz = mov_zr.match(prev.op_str)
+                if mz and self._aarch64_reg_in(mz.group(1), len_aliases):
+                    return True  # length set from the zero register -> literal 0
+                ml = load_mem.match(prev.op_str)
+                if ml and self._aarch64_reg_in(ml.group(1), len_aliases):
+                    return False  # length reloaded from memory -> possibly tainted
+                mc = reg_copy.match(prev.op_str)
+                if mc and self._aarch64_reg_in(mc.group(1), len_aliases):
+                    # dest aliases the length reg; follow its source instead.
+                    src = mc.group(2)
+                    len_aliases = len_aliases | {src, "x" + src[1:], "w" + src[1:]}
+                    continue
+            return False
+
+        # x86_64 (SysV). 32-bit sub-register alias: edx writes zero-extend into
+        # rdx, and -O0 codegen materializes a small literal length as
+        # `mov edx, 0x3f`.
+        len_aliases = {len_reg, "e" + len_reg[1:]}
+
+        # reg <- immediate: a compile-time constant length.
+        mov_imm = re.compile(r"^(r[a-z0-9]+|e[a-z0-9]+),\s*(?:0x[0-9a-f]+|\d+)$")
+        # reg <- reg: a register copy (alias propagation).
+        reg_copy = re.compile(r"^(r[a-z0-9]+|e[a-z0-9]+),\s*(r[a-z0-9]+|e[a-z0-9]+)$")
+        # reg <- [rbp/rsp +/- N]: a stack-slot reload (non-literal / possibly tainted).
+        load_slot = re.compile(
+            r"^(r[a-z0-9]+|e[a-z0-9]+),\s*(?:[a-z]+ ptr )?\[(rbp|rsp)\s*[+\-]"
+        )
 
         # mov-family mnemonics that move a value into a register: plain mov plus
         # the sign/zero-extending forms -O0 uses to widen a small length

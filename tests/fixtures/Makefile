@@ -36,7 +36,7 @@ all: $(BINS) aarch64
 %: %.c
 	$(CC) $(ARCH) $(CFLAGS) -o $@ $<
 
-aarch64: cwe78-aarch64-vuln cwe732-aarch64-vuln cwe190-aarch64-vuln cwe134-aarch64-vuln cwe415-aarch64-vuln cwe416-aarch64-vuln cwe369-aarch64-vuln
+aarch64: cwe78-aarch64-vuln cwe732-aarch64-vuln cwe190-aarch64-vuln cwe134-aarch64-vuln cwe415-aarch64-vuln cwe416-aarch64-vuln cwe369-aarch64-vuln cwe787-aarch64-vuln
 
 cwe78-aarch64-vuln: cwe78-aarch64-vuln.c cwe78-aarch64-stubs.c
 	$(AARCH64_CC) $(AARCH64_TARGET) $(AARCH64_CFLAGS) -c cwe78-aarch64-vuln.c -o cwe78-aarch64-vuln.o
@@ -111,8 +111,22 @@ cwe369-aarch64-vuln: cwe369-aarch64-vuln.c cwe369-aarch64-stubs.c
 	$(AARCH64_LD) -o $@ cwe369-aarch64-vuln.o cwe369-aarch64-stubs.o -e _start --no-dynamic-linker
 	rm -f cwe369-aarch64-vuln.o cwe369-aarch64-stubs.o
 
+# AArch64 CWE-787 fixture: exercises the CWE-787 out-of-bounds-write check. The
+# call-site-driven malloc+memcpy co-location heuristic pairs the allocator with a
+# bulk-copy sink; the copy length is read from the AAPCS64 argument register
+# (x2/w2). A stack-slot reload (`ldr w2, [x29, #N]`) is the non-literal /
+# attacker-controlled length (flagged), while the safe `safe_copy()` uses a
+# literal length (`mov w2, #0x3f`) that the resolver suppresses. Same
+# freestanding cross-build recipe as the other AArch64 fixtures.
+cwe787-aarch64-vuln: cwe787-aarch64-vuln.c cwe787-aarch64-stubs.c
+	$(AARCH64_CC) $(AARCH64_TARGET) $(AARCH64_CFLAGS) -c cwe787-aarch64-vuln.c -o cwe787-aarch64-vuln.o
+	$(AARCH64_CC) $(AARCH64_TARGET) $(AARCH64_CFLAGS) -c cwe787-aarch64-stubs.c -o cwe787-aarch64-stubs.o
+	$(AARCH64_LD) -o $@ cwe787-aarch64-vuln.o cwe787-aarch64-stubs.o -e _start --no-dynamic-linker
+	rm -f cwe787-aarch64-vuln.o cwe787-aarch64-stubs.o
+
 clean:
 	rm -f $(BINS) cwe78-aarch64-vuln cwe78-aarch64-vuln.o cwe78-aarch64-stubs.o \
+		cwe787-aarch64-vuln cwe787-aarch64-vuln.o cwe787-aarch64-stubs.o \
 		cwe732-aarch64-vuln cwe732-aarch64-vuln.o cwe732-aarch64-stubs.o \
 		cwe190-aarch64-vuln cwe190-aarch64-vuln.o cwe190-aarch64-stubs.o \
 		cwe134-aarch64-vuln cwe134-aarch64-vuln.o cwe134-aarch64-stubs.o \

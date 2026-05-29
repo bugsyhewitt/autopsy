@@ -26,6 +26,7 @@ run without a compiler. This file documents how to regenerate them if needed.
 | `cwe415-aarch64-vuln.c` + `cwe415-aarch64-stubs.c` / `cwe415-aarch64-vuln` | source + binary: **AArch64** intra-procedural double-free (exercises the arch-aware register-level CWE-415 check on ARM64); the single free in `safe_free()` must not be flagged |
 | `cwe416-aarch64-vuln.c` + `cwe416-aarch64-stubs.c` / `cwe416-aarch64-vuln` | source + binary: **AArch64** intra-procedural use-after-free (exercises the arch-aware register-level CWE-416 check on ARM64: free then dereference of the same pointer in `use_after_free()`); the freed-but-not-reused pointer in `safe_free()` must not be flagged |
 | `cwe369-aarch64-vuln.c` + `cwe369-aarch64-stubs.c` / `cwe369-aarch64-vuln` | source + binary: **AArch64** divide-by-zero (exercises the arch-aware CWE-369 check on ARM64: unguarded `sdiv`/`udiv` in `risky_ratio()`); the zero-checked `safe_ratio()` must not be flagged |
+| `cwe787-aarch64-vuln.c` + `cwe787-aarch64-stubs.c` / `cwe787-aarch64-vuln` | source + binary: **AArch64** out-of-bounds write (exercises the CWE-787 check on ARM64: malloc+memcpy co-location with a variable, stack-slot-reloaded length in `copy_to_heap()`); the literal-length `strncpy` in `safe_copy()` must not be flagged |
 | `clean-baseline.c` / `clean-baseline` | source + binary: none of the four classes (zero-false-positive check) |
 | `Makefile` | build rules |
 
@@ -229,6 +230,31 @@ You should see `sdiv w0, w8, w9` with no preceding `cbz`/`cbnz`/`cmp` on `w9` in
 `<risky_ratio>` (the unguarded divide), and a `cbnz w8, ...` guard before the
 `sdiv w8, w8, w9` in `<safe_ratio>` (the zero-check that must stay unflagged),
 with `bl ... <fgets>` and `bl ... <atoi>` in `<main>`.
+
+`cwe787-aarch64-vuln` exercises the CWE-787 out-of-bounds-write check on AArch64.
+The check is a call-site-driven malloc+copy co-location heuristic; its only
+register-level dependency is the length-literal resolver, which reads the
+bulk-copy *length* out of the AAPCS64 third-argument register (`x2`/`w2`).
+`copy_to_heap()` pairs `malloc` with a `memcpy` whose length is reloaded from the
+spilled `length` parameter (`ldursw x2, [x29, #N]`) — a non-literal, possibly
+tainted length — so it fires (medium confidence). `safe_copy()` pairs `malloc`
+with a `strncpy` whose length is a compile-time immediate (`mov x2, #0x3f`) — a
+literal the resolver suppresses — so it must NOT fire (zero false positives). The
+program-wide attacker-input source is `fgets`/`atoi` in `main()`. Same
+freestanding cross-build recipe (stub libc in `cwe787-aarch64-stubs.c`, which
+also defines `stdin` and a `memset` stub for the `char src[256] = {0}`
+zero-init). Verify the codegen with:
+
+```bash
+llvm-objdump -d cwe787-aarch64-vuln | grep -B6 'bl.*<memcpy>'
+llvm-objdump -d cwe787-aarch64-vuln | grep -B6 'bl.*<strncpy>'
+```
+
+You should see `ldursw x2, [x29, #N]` (or another `ldr`/`ldur` of `w2`/`x2`)
+immediately before `bl ... <memcpy>` in `<copy_to_heap>` (the non-literal length
+that fires), and `mov x2, #0x3f` immediately before `bl ... <strncpy>` in
+`<safe_copy>` (the literal length that must stay unflagged), with
+`bl ... <fgets>` and `bl ... <atoi>` in `<main>`.
 
 Toolchain:
 

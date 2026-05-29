@@ -57,15 +57,24 @@ def test_amd64_runs_every_check():
     assert skipped == []
 
 
+def test_aarch64_runs_cwe787_oob_write_check():
+    # CWE-787 is now arch-aware: its only register-level dependency
+    # (copy_call_length_is_literal) knows the AAPCS64 x2/w2 length argument.
+    eng = _engine_for_arch("AARCH64")
+    runnable, skipped = eng.checks_supported_on_arch([787, 119, 78])
+    assert runnable == [787, 78]
+    assert skipped == [119]
+
+
 def test_aarch64_runs_only_arch_agnostic_checks():
     eng = _engine_for_arch("AARCH64")
     runnable, skipped = eng.checks_supported_on_arch([119, 190, 415, 416, 78, 787])
-    # Only the arch-agnostic checks run on AArch64. CWE-415 and CWE-416 are now
-    # arch-aware (their intra-procedural double-free / use-after-free scanners
-    # know the AArch64 register/slot/deref forms).
-    assert runnable == [190, 415, 416, 78]
-    # The remaining x86_64-only register-level checks are recorded as skipped.
-    assert skipped == [119, 787]
+    # Only the arch-agnostic checks run on AArch64. CWE-415, CWE-416, and CWE-787
+    # are now arch-aware (their double-free / use-after-free scanners and the
+    # CWE-787 length-literal resolver know the AArch64 register/slot/deref forms).
+    assert runnable == [190, 415, 416, 78, 787]
+    # The remaining x86_64-only register-level check is recorded as skipped.
+    assert skipped == [119]
 
 
 def test_aarch64_runs_cwe732_permission_check():
