@@ -253,6 +253,34 @@ def test_cwe369_detected(require_angr, fixtures_dir):
     assert "atoi" in vuln[0]["evidence"] or "fgets" in vuln[0]["evidence"]
 
 
+def test_cwe732_detected(require_angr, fixtures_dir):
+    # Incorrect permission assignment: expose_secret() chmods 0777 and
+    # widen_shared() chmods 0666 (both group/world writable); loose_umask()
+    # calls umask(0). lock_down() (chmod 0600) and tight_umask() (umask 0077)
+    # are restrictive and must NOT fire.
+    rep = _analyze(fixtures_dir, "cwe732-vuln", "732")
+    d = rep.to_dict()
+    assert d["error"] is None
+    cwe732 = [f for f in d["findings"] if f["cwe"] == 732]
+    assert cwe732, f"expected CWE-732 findings, got {d['findings']}"
+    for f in cwe732:
+        _assert_finding_contract(f, 732)
+    funcs = {f["function"] for f in cwe732}
+    assert "expose_secret" in funcs, f"chmod(0777) not flagged: {cwe732}"
+    assert "widen_shared" in funcs, f"chmod(0666) not flagged: {cwe732}"
+    assert "loose_umask" in funcs, f"umask(0) not flagged: {cwe732}"
+    # The restrictive owner-only modes must never be flagged (zero false positives).
+    assert "lock_down" not in funcs, f"chmod(0600) must not fire: {cwe732}"
+    assert "tight_umask" not in funcs, f"umask(0077) must not fire: {cwe732}"
+    # A definitive over-permissive chmod literal -> high confidence.
+    chmod_findings = [f for f in cwe732 if f["function"] in ("expose_secret", "widen_shared")]
+    assert chmod_findings and all(f["confidence"] == "high" for f in chmod_findings)
+    # umask policy weakness -> medium confidence.
+    umask_findings = [f for f in cwe732 if f["function"] == "loose_umask"]
+    assert umask_findings and umask_findings[0]["confidence"] == "medium"
+    assert "0o777" in " ".join(f["evidence"] for f in cwe732)
+
+
 def test_cwe78_detected_on_aarch64(require_angr, fixtures_dir):
     # AArch64 (ARM64) support: the call-site-driven CWE-78 check must fire on a
     # `bl` (branch-with-link) call to system() fed by an fgets() source, exactly
@@ -273,7 +301,7 @@ def test_aarch64_skips_register_level_checks(require_angr, fixtures_dir):
     rep = _analyze(fixtures_dir, "cwe78-aarch64-vuln", "all")
     d = rep.to_dict()
     assert d["error"] is None, f"aarch64 fixture errored: {d['error']}"
-    assert set(d["skipped_checks"]) == {119, 369, 415, 416, 134, 787}
+    assert set(d["skipped_checks"]) == {119, 369, 415, 416, 134, 732, 787}
     # The CWE-78 finding still surfaces under "all".
     assert any(f["cwe"] == 78 for f in d["findings"])
 
@@ -314,6 +342,7 @@ def test_max_states_high_completes_all_fixtures(require_angr, fixtures_dir):
         ("cwe78-vuln", 78),
         ("cwe134-vuln", 134),
         ("cwe676-vuln", 676),
+        ("cwe732-vuln", 732),
         ("cwe787-vuln", 787),
     ]:
         rep = analyze(binary=str(fixtures_dir / name), checks_token=str(cwe),

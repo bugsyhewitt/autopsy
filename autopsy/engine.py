@@ -117,7 +117,7 @@ class AngrEngine:
 
         x86_64 (AMD64) is fully supported. AArch64 (ARM64) is supported for the
         call-site-driven checks (CWE-78, CWE-190); the register-level checks
-        (CWE-119/415/416/787) use x86_64 register conventions and report no
+        (CWE-119/415/416/732/787) use x86_64 register conventions and report no
         findings on AArch64 — see :meth:`checks_supported_on_arch`.
         """
         arch_name = self.project.arch.name
@@ -777,6 +777,211 @@ class AngrEngine:
                 len_aliases = len_aliases | {mc.group(2), self._widen(mc.group(2))}
                 continue
         return False
+
+    # Permission-setting sinks mapped to the SysV/x86_64 register that carries
+    # their *mode* argument (the octal permission bits). ``chmod``/``fchmod``/
+    # ``lchmod`` take the mode as their second parameter (``rsi``); ``fchmodat``
+    # takes it third (``rsi`` is the path, ``rdx`` the mode). ``umask`` takes its
+    # single mask argument first (``rdi``) — it is handled separately because the
+    # *dangerous* mask is the inverse pattern (a mask that does NOT mask off the
+    # group/other write bits).
+    _CHMOD_SINK_MODE_REG: dict[str, str] = {
+        "chmod": "rsi",       # chmod(path, mode)
+        "fchmod": "rsi",      # fchmod(fd, mode)
+        "lchmod": "rsi",      # lchmod(path, mode)
+        "fchmodat": "rdx",    # fchmodat(dirfd, path, mode, flags)
+    }
+
+    # The world-write (0o002) and group-write (0o020) permission bits. A mode
+    # that sets either grants write access beyond the owner — the CWE-732
+    # "incorrect permission assignment for a critical resource" signal.
+    _WORLD_WRITE = 0o002
+    _GROUP_WRITE = 0o020
+
+    def chmod_calls_with_permissive_mode(self) -> list[dict[str, Any]]:
+        """Find chmod-family calls whose *mode* immediate grants group/other write.
+
+        Detects the CWE-732 (Incorrect Permission Assignment for Critical
+        Resource) pattern: a call to ``chmod``/``fchmod``/``lchmod``/``fchmodat``
+        whose permission-mode argument is a compile-time immediate that sets the
+        group-write (``0o020``) or world-write (``0o002``) bit — e.g.
+        ``chmod(path, 0777)`` or ``chmod(path, 0666)``. Such a mode makes the
+        resource writable by users other than the owner, which is the classic
+        permission-assignment weakness.
+
+        The mode argument register is architecture- and function-specific (SysV:
+        ``rsi`` for chmod/fchmod/lchmod, ``rdx`` for fchmodat). This method walks
+        back from each call resolving how that register was last set; it reports
+        the site only when the mode is provably an immediate with a group/other
+        write bit set. Modes loaded from a register or stack slot (computed at
+        runtime) are NOT flagged — the value is unknown, so flagging would risk a
+        false positive and break autopsy's zero-false-positive posture.
+
+        Returns one dict per permissive-mode call:
+        ``{"address": int, "function": str, "sink_name": str, "mode": int}``.
+
+        x86_64 only: the mode-argument register mapping uses the SysV calling
+        convention and the immediate/aliasing tracking assumes -O0 codegen.
+        Returns an empty list on non-AMD64 targets.
+        """
+        import re
+
+        if self.project.arch.name != "AMD64":
+            return []
+
+        cfg = self.cfg()
+        call_mnemonics = self._call_mnemonics()
+
+        # reg <- immediate: a compile-time constant mode. -O0 materializes a
+        # small octal literal with a 32-bit move (`mov esi, 0x1ff` for 0o777).
+        mov_imm = re.compile(r"^(r[a-z0-9]+|e[a-z0-9]+),\s*((?:0x[0-9a-f]+)|\d+)$")
+        # reg <- reg: a register copy (alias propagation).
+        reg_copy = re.compile(r"^(r[a-z0-9]+|e[a-z0-9]+),\s*(r[a-z0-9]+|e[a-z0-9]+)$")
+        # reg <- [rbp/rsp +/- N]: a stack-slot reload (runtime-computed mode).
+        load_slot = re.compile(
+            r"^(r[a-z0-9]+|e[a-z0-9]+),\s*(?:[a-z]+ ptr )?\[(rbp|rsp)\s*[+\-]"
+        )
+
+        results: list[dict[str, Any]] = []
+        for func in cfg.kb.functions.values():
+            if getattr(func, "is_plt", False) or getattr(func, "is_simprocedure", False):
+                continue
+            insns: list[Any] = []
+            for block in func.blocks:
+                try:
+                    insns.extend(block.capstone.insns)
+                except Exception:  # pragma: no cover - defensive
+                    continue
+            insns.sort(key=lambda i: i.address)
+
+            for idx, insn in enumerate(insns):
+                if insn.mnemonic not in call_mnemonics:
+                    continue
+                target = self._resolve_call_target(insn, cfg)
+                mode_reg = self._CHMOD_SINK_MODE_REG.get(target)
+                if mode_reg is None:
+                    continue
+
+                # The 32-bit sub-register (esi/edx) zero-extends into the 64-bit
+                # mode register; -O0 sets a small octal literal via that form.
+                mode_aliases = {mode_reg, "e" + mode_reg[1:]}
+                mode_val: int | None = None
+                for prev in reversed(insns[max(0, idx - 12): idx]):
+                    if prev.mnemonic != "mov":
+                        # Non-mov touching the mode reg would mean a computed
+                        # value we can't resolve; stay conservative and stop.
+                        continue
+                    mi = mov_imm.match(prev.op_str)
+                    if mi and self._reg_in(mi.group(1), mode_aliases):
+                        mode_val = int(mi.group(2), 0)
+                        break
+                    ms = load_slot.match(prev.op_str)
+                    if ms and self._reg_in(ms.group(1), mode_aliases):
+                        # mode reloaded from a stack slot -> runtime value, unknown.
+                        break
+                    mc = reg_copy.match(prev.op_str)
+                    if mc and self._reg_in(mc.group(1), mode_aliases):
+                        mode_aliases = mode_aliases | {mc.group(2), self._widen(mc.group(2))}
+                        continue
+
+                if mode_val is None:
+                    continue
+                if mode_val & (self._WORLD_WRITE | self._GROUP_WRITE):
+                    results.append(
+                        {
+                            "address": insn.address,
+                            "function": func.name,
+                            "sink_name": target,
+                            "mode": mode_val,
+                        }
+                    )
+        return results
+
+    def umask_calls_with_permissive_mask(self) -> list[dict[str, Any]]:
+        """Find ``umask`` calls whose immediate mask fails to mask group/other write.
+
+        ``umask(mask)`` sets the process file-creation mask: bits set in ``mask``
+        are *removed* from the default permissions of newly-created files. A
+        secure program sets ``umask(0o077)`` (strip all group/other access) or at
+        least ``umask(0o022)`` (strip group/other write). ``umask(0)`` — or any
+        mask that leaves the group-write (``0o020``) or world-write (``0o002``)
+        bit clear — means subsequently-created files can be group/world writable,
+        the CWE-732 weakness applied to the whole process.
+
+        This flags a ``umask`` call whose mask is a compile-time immediate that
+        does NOT set both the group-write and world-write bits (i.e.
+        ``(mask & 0o022) != 0o022``). The argument lives in ``rdi`` (SysV first
+        argument). Runtime-computed masks are not flagged (unknown value).
+
+        Returns one dict per permissive-mask call:
+        ``{"address": int, "function": str, "sink_name": "umask", "mode": int}``.
+
+        x86_64 only.
+        """
+        import re
+
+        if self.project.arch.name != "AMD64":
+            return []
+
+        cfg = self.cfg()
+        call_mnemonics = self._call_mnemonics()
+
+        mov_imm = re.compile(r"^(r[a-z0-9]+|e[a-z0-9]+),\s*((?:0x[0-9a-f]+)|\d+)$")
+        reg_copy = re.compile(r"^(r[a-z0-9]+|e[a-z0-9]+),\s*(r[a-z0-9]+|e[a-z0-9]+)$")
+        load_slot = re.compile(
+            r"^(r[a-z0-9]+|e[a-z0-9]+),\s*(?:[a-z]+ ptr )?\[(rbp|rsp)\s*[+\-]"
+        )
+
+        results: list[dict[str, Any]] = []
+        strip_bits = self._WORLD_WRITE | self._GROUP_WRITE  # 0o022
+        for func in cfg.kb.functions.values():
+            if getattr(func, "is_plt", False) or getattr(func, "is_simprocedure", False):
+                continue
+            insns: list[Any] = []
+            for block in func.blocks:
+                try:
+                    insns.extend(block.capstone.insns)
+                except Exception:  # pragma: no cover - defensive
+                    continue
+            insns.sort(key=lambda i: i.address)
+
+            for idx, insn in enumerate(insns):
+                if insn.mnemonic not in call_mnemonics:
+                    continue
+                if self._resolve_call_target(insn, cfg) != "umask":
+                    continue
+                mask_aliases = {"rdi", "edi"}
+                mask_val: int | None = None
+                for prev in reversed(insns[max(0, idx - 12): idx]):
+                    if prev.mnemonic != "mov":
+                        continue
+                    mi = mov_imm.match(prev.op_str)
+                    if mi and self._reg_in(mi.group(1), mask_aliases):
+                        mask_val = int(mi.group(2), 0)
+                        break
+                    ms = load_slot.match(prev.op_str)
+                    if ms and self._reg_in(ms.group(1), mask_aliases):
+                        break
+                    mc = reg_copy.match(prev.op_str)
+                    if mc and self._reg_in(mc.group(1), mask_aliases):
+                        mask_aliases = mask_aliases | {mc.group(2), self._widen(mc.group(2))}
+                        continue
+
+                if mask_val is None:
+                    continue
+                # Dangerous when the mask does not strip BOTH group- and
+                # world-write bits — i.e. files it creates can be made writable
+                # by group/other.
+                if (mask_val & strip_bits) != strip_bits:
+                    results.append(
+                        {
+                            "address": insn.address,
+                            "function": func.name,
+                            "sink_name": "umask",
+                            "mode": mask_val,
+                        }
+                    )
+        return results
 
     # Division mnemonics whose divisor (the single explicit operand) can be zero
     # at runtime. ``div``/``idiv`` raise #DE (SIGFPE) when the divisor is 0.

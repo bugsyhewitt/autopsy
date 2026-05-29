@@ -13,10 +13,10 @@ from __future__ import annotations
 from typing import Any
 
 # The whole-program CWE classes autopsy detects.
-SUPPORTED_CWES: tuple[int, ...] = (119, 190, 338, 369, 377, 415, 416, 78, 134, 676, 787)
+SUPPORTED_CWES: tuple[int, ...] = (119, 190, 338, 369, 377, 415, 416, 78, 134, 676, 732, 787)
 
 # Valid tokens accepted by --checks.
-VALID_TOKENS: tuple[str, ...] = ("119", "190", "338", "369", "377", "415", "416", "78", "134", "676", "787", "all")
+VALID_TOKENS: tuple[str, ...] = ("119", "190", "338", "369", "377", "415", "416", "78", "134", "676", "732", "787", "all")
 
 # Canonical, human-readable metadata for every CWE autopsy detects. Keyed by
 # CWE id. ``name`` is the full MITRE title, ``short`` a terse label, ``uri`` the
@@ -73,6 +73,11 @@ CWE_CATALOG: dict[int, dict[str, str]] = {
         "short": "Dangerous Function",
         "uri": "https://cwe.mitre.org/data/definitions/676.html",
     },
+    732: {
+        "name": "Incorrect Permission Assignment for Critical Resource",
+        "short": "Incorrect Permission Assignment",
+        "uri": "https://cwe.mitre.org/data/definitions/732.html",
+    },
     787: {
         "name": "Out-of-bounds Write",
         "short": "Out-of-bounds Write",
@@ -116,7 +121,7 @@ def resolve_checks(token: str) -> list[int]:
 
     Args:
         token: One of "119", "190", "338", "377", "415", "416", "78", "134",
-            "676", "787", or "all".
+            "676", "732", "787", or "all".
 
     Returns:
         Ordered list of CWE ids to run. "all" expands to every supported CWE
@@ -127,7 +132,7 @@ def resolve_checks(token: str) -> list[int]:
     """
     if token == "all":
         return list(SUPPORTED_CWES)
-    if token in {"119", "190", "338", "369", "377", "415", "416", "78", "134", "676", "787"}:
+    if token in {"119", "190", "338", "369", "377", "415", "416", "78", "134", "676", "732", "787"}:
         return [int(token)]
     raise ValueError(
         f"unknown check token {token!r}; expected one of {', '.join(VALID_TOKENS)}"
