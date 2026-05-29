@@ -1084,6 +1084,192 @@ class AngrEngine:
                 return True
         return False
 
+    # Allocators whose return value is NULL on failure and must be NULL-checked
+    # before the returned pointer is dereferenced. ``malloc``/``calloc``/
+    # ``realloc`` return NULL when the allocation fails; ``strdup``/``strndup``
+    # and ``getenv`` likewise return NULL (no such variable / OOM). The SysV
+    # x86_64 ABI returns the pointer in ``rax``.
+    _NULLABLE_ALLOCATORS: frozenset[str] = frozenset({
+        "malloc", "calloc", "realloc", "reallocarray",
+        "strdup", "strndup",
+        "getenv", "secure_getenv",
+    })
+
+    def unchecked_alloc_dereferences(self) -> list[dict[str, Any]]:
+        """Find allocator results dereferenced without an intervening NULL-check.
+
+        Detects the CWE-476 (NULL Pointer Dereference) pattern that dominates
+        real-world C code: a call to a NULL-returning allocator
+        (``malloc``/``calloc``/``realloc``/``strdup``/``getenv`` …) whose result
+        pointer is dereferenced — read or written through — *before* the program
+        tests it against NULL. ``p = malloc(n); p[0] = ...;`` with no
+        ``if (p == NULL)`` is the textbook case: when the allocation fails the
+        store faults on the NULL page (SIGSEGV), and on some targets an attacker
+        who can force the failure turns the crash into a controlled write.
+
+        x86_64 SysV returns the pointer in ``rax``. -O0 codegen spills ``rax`` to
+        a stack slot immediately after the call; a later use reloads the slot
+        into a register and dereferences it (``mov rax,[rbp-N]; mov [rax],...``
+        or ``... [rax]``). This walks each function in address order and, for
+        every allocator call, locates the stack slot the result was stored into,
+        then scans forward for the first dereference through a register that
+        aliases that slot. A site is reported only if **no NULL-check guard**
+        (a ``test``/``cmp`` on the result register or the slot, followed by a
+        conditional branch) appears between the call and that dereference.
+
+        Excluding guarded sites is what preserves autopsy's zero-false-positive
+        posture: ``p = malloc(n); if (!p) return; p[0] = ...;`` checks before it
+        uses and must stay silent. A result that is never spilled to a slot, or
+        never dereferenced, or dereferenced only after a guard, is not reported.
+
+        Unlike the taint-flow checks (CWE-78/134), CWE-476 needs no
+        attacker-input source: the missing NULL-check is the weakness itself,
+        regardless of any input path — which is how MITRE frames it.
+
+        Returns one dict per unchecked dereference:
+        ``{"address": int, "function": str, "alloc_name": str,
+        "alloc_address": int, "slot": str}`` — ``address`` is the dereference,
+        ``alloc_address`` the allocator call.
+
+        x86_64 only: the result register (``rax``) and slot/guard reasoning rely
+        on x86_64 SysV conventions and -O0 codegen, so this returns an empty
+        list on non-AMD64 targets (the check is excluded from the
+        architecture-agnostic set and skipped on AArch64 upstream).
+        """
+        import re
+
+        if self.project.arch.name != "AMD64":
+            return []
+
+        cfg = self.cfg()
+        call_mnemonics = self._call_mnemonics()
+
+        # rax (or eax) spilled to a stack slot right after the alloc returns.
+        store_rax = re.compile(
+            r"^(?:qword ptr )?\[(rbp|rsp)\s*([+\-]\s*(?:0x[0-9a-f]+|\d+))\],\s*(rax|eax)$"
+        )
+        # reg <- [slot]: a reload of the result slot into a register.
+        load_slot = re.compile(
+            r"^(r[a-z0-9]+),\s*(?:qword ptr )?\[(rbp|rsp)\s*([+\-]\s*(?:0x[0-9a-f]+|\d+))\]$"
+        )
+        # reg <- reg: register-copy alias propagation.
+        reg_copy = re.compile(r"^(r[a-z0-9]+),\s*(r[a-z0-9]+)$")
+        # A dereference: any memory operand whose base register we resolved as an
+        # alias of the result pointer, e.g. `[rax]`, `qword ptr [rax + 8]`.
+        deref_base = re.compile(r"\[(r[a-z0-9]+)")
+        # NULL-check guard idioms on a register: `test rax, rax`, `cmp rax, 0`.
+        cond_jumps = {
+            "je", "jz", "jne", "jnz", "jbe", "jb", "ja", "jae",
+            "jle", "jl", "jg", "jge", "js", "jns",
+        }
+
+        results: list[dict[str, Any]] = []
+        for func in cfg.kb.functions.values():
+            if getattr(func, "is_plt", False) or getattr(func, "is_simprocedure", False):
+                continue
+            insns: list[Any] = []
+            for block in func.blocks:
+                try:
+                    insns.extend(block.capstone.insns)
+                except Exception:  # pragma: no cover - defensive
+                    continue
+            insns.sort(key=lambda i: i.address)
+
+            for idx, insn in enumerate(insns):
+                if insn.mnemonic not in call_mnemonics:
+                    continue
+                target = self._resolve_call_target(insn, cfg)
+                if target not in self._NULLABLE_ALLOCATORS:
+                    continue
+
+                # Find the slot the result (rax) is spilled into, in the few
+                # instructions immediately after the call. If the result is never
+                # spilled we cannot track it conservatively -> skip.
+                slot: str | None = None
+                spill_idx = idx
+                for j in range(idx + 1, min(idx + 5, len(insns))):
+                    if insns[j].mnemonic == "mov":
+                        ms = store_rax.match(insns[j].op_str)
+                        if ms:
+                            slot = f"{ms.group(1)}{ms.group(2).replace(' ', '')}"
+                            spill_idx = j
+                            break
+                    # A second call before the spill clobbers rax -> give up.
+                    if insns[j].mnemonic in call_mnemonics:
+                        break
+                if slot is None:
+                    continue
+
+                self._record_unchecked_deref(
+                    insns, spill_idx, slot, func.name, target, insn.address,
+                    load_slot, reg_copy, deref_base, cond_jumps, results,
+                )
+
+        return results
+
+    @staticmethod
+    def _record_unchecked_deref(
+        insns, spill_idx, slot, func_name, alloc_name, alloc_address,
+        load_slot, reg_copy, deref_base, cond_jumps, results,
+    ) -> None:
+        """Scan forward from a result spill for an unguarded dereference.
+
+        Tracks the registers that alias the result ``slot`` and the result
+        value itself. If a NULL-check guard (``test``/``cmp`` on the slot or an
+        aliasing register, followed by a conditional branch) is seen first, the
+        site is guarded and nothing is recorded. Otherwise the first
+        dereference through an aliasing register is appended to ``results``.
+        """
+        alias_regs: set[str] = set()
+        for insn in insns[spill_idx + 1:]:
+            op = insn.op_str
+
+            # A reload of the result slot establishes a fresh alias register.
+            ml = load_slot.match(op)
+            if insn.mnemonic == "mov" and ml and \
+                    f"{ml.group(2)}{ml.group(3).replace(' ', '')}" == slot:
+                alias_regs.add(ml.group(1))
+                continue
+
+            # Register-copy propagation of an existing alias.
+            mc = reg_copy.match(op)
+            if insn.mnemonic == "mov" and mc and mc.group(2) in alias_regs:
+                alias_regs.add(mc.group(1))
+                continue
+
+            # A NULL-check on the slot or an aliasing register, followed (this
+            # scan) by a conditional branch, guards the pointer -> not a finding.
+            if insn.mnemonic in ("test", "cmp"):
+                # Slot strings are stored space-normalized (``rbp-8``) but
+                # capstone renders memory operands with spaces (``[rbp - 8]``);
+                # compare against the whitespace-stripped op_str.
+                op_nospace = op.replace(" ", "")
+                touches_slot = slot in op_nospace
+                touches_alias = any(a in op for a in alias_regs)
+                if touches_slot or touches_alias:
+                    # Look ahead for the conditional branch that consumes the
+                    # flags this compare set; its presence is the guard.
+                    after = insns[insns.index(insn) + 1: insns.index(insn) + 6]
+                    if any(nx.mnemonic in cond_jumps for nx in after):
+                        return
+                continue
+
+            # A dereference through an aliasing register, where the register is
+            # the *base* of a memory operand (not merely mentioned). The store
+            # form `mov [rax], src` and any read `... [rax+8]` both qualify.
+            md = deref_base.search(op)
+            if md and md.group(1) in alias_regs:
+                results.append(
+                    {
+                        "address": insn.address,
+                        "function": func_name,
+                        "alloc_name": alloc_name,
+                        "alloc_address": alloc_address,
+                        "slot": slot,
+                    }
+                )
+                return
+
     @staticmethod
     def _widen(reg: str) -> str:
         """Map a 32-bit sub-register name to its 64-bit form (edx -> rdx)."""

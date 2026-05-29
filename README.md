@@ -170,23 +170,23 @@ never written from, nor applied to, a half-finished run.
 
 | Architecture | Checks that run |
 |---|---|
-| **x86_64 (AMD64)** | all checks (CWE-119, 190, 338, 367, 369, 377, 415, 416, 78, 134, 676, 732, 787) |
+| **x86_64 (AMD64)** | all checks (CWE-119, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787) |
 | **AArch64 (ARM64)** | the call-site-driven checks: **CWE-78**, **CWE-190**, **CWE-338**, **CWE-367**, **CWE-377** and **CWE-676** |
 
-On an AArch64 target, the register-level checks (CWE-119/369/415/416/134/787)
+On an AArch64 target, the register-level checks (CWE-119/369/415/416/476/134/787)
 rely on x86_64 register conventions, so they are **skipped** rather than
 producing unsound results. Skipped checks are listed in the report's
 `skipped_checks` array and noted on stderr:
 
 ```bash
 autopsy --binary ./arm64-target --checks all
-# stderr: note: skipped CWE-119, CWE-369, CWE-415, CWE-416, CWE-134, CWE-732, CWE-787 (not supported on this target's architecture)
+# stderr: note: skipped CWE-119, CWE-369, CWE-415, CWE-416, CWE-476, CWE-134, CWE-732, CWE-787 (not supported on this target's architecture)
 ```
 
 ```json
 {
-  "checks": [119, 190, 338, 367, 369, 377, 415, 416, 78, 134, 676, 732, 787],
-  "skipped_checks": [119, 369, 415, 416, 134, 787],
+  "checks": [119, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787],
+  "skipped_checks": [119, 369, 415, 416, 476, 134, 787],
   "findings": [ /* CWE-78 / CWE-190 / CWE-338 / CWE-367 / CWE-377 / CWE-676 findings */ ]
 }
 ```
@@ -735,6 +735,55 @@ autopsy --binary tests/fixtures/cwe732-vuln --checks 732 --format json
   ],
   "evidence": "chmod() sets mode 0o777 in expose_secret: grants group-write and world-write access, making the resource writable beyond its owner; restrict to 0o600/0o644 (owner-write only)",
   "confidence": "high"
+}
+```
+
+### CWE-476 — NULL pointer dereference
+
+A pointer returned by a **NULL-returning allocator** that is **dereferenced
+before it is checked against NULL**. The textbook case is
+`p = malloc(n); p[0] = ...;` with no `if (p == NULL)`: when the allocation
+fails `malloc()` returns NULL, the store faults on the unmapped zero page
+(SIGSEGV), and on some targets an attacker who can force the failure escalates
+the crash into a controlled write. CWE-476 is one of the most frequently
+reported weakness classes in C/C++ and a perennial CWE Top 25 entry.
+
+The check tracks the allocators whose contract is "returns NULL on
+failure/absence" — `malloc`, `calloc`, `realloc`, `reallocarray`, `strdup`,
+`strndup`, `getenv`, `secure_getenv`. The result arrives in `rax` (x86_64
+SysV); -O0 codegen spills it to a stack slot, and a later use reloads the slot
+and dereferences it. autopsy finds each allocator call, locates that slot, and
+flags the first dereference through it — **unless a NULL-check guard
+(`test`/`cmp` on the result, followed by a conditional branch) intervenes
+first**.
+
+Zero-false-positive posture: `p = malloc(n); if (!p) return; p[0] = ...;`
+checks before it uses and is silent (the `safe_fill` and `safe_env` companions
+in the fixture stay quiet). A result that is never spilled, never
+dereferenced, or dereferenced only after a guard is not reported. Like
+CWE-732/676/377, CWE-476 needs no attacker-input source: the missing NULL-check
+is the weakness itself. Findings carry `confidence: "medium"` — an unchecked
+dereference of an allocator result is a strong structural signal, but the
+slot tracking is not a full def-use proof of the faulting pointer on every path.
+
+This is a **register-level** detector (it reads the x86_64 result register and
+stack slots), so it runs on **x86_64 only** and is skipped on AArch64.
+
+```bash
+autopsy --binary tests/fixtures/cwe476-vuln --checks 476 --format json
+```
+
+```json
+{
+  "cwe": 476,
+  "function": "risky_fill",
+  "address": "0x40119a",
+  "taint_trace": [
+    {"address": "0x40118d", "description": "malloc() may return NULL (allocation failure / absent value)"},
+    {"address": "0x40119a", "description": "dereference of the malloc() result with no intervening NULL-check"}
+  ],
+  "evidence": "pointer returned by malloc() in risky_fill is dereferenced with no NULL-check; a failed/absent malloc() returns NULL and the dereference faults (SIGSEGV)",
+  "confidence": "medium"
 }
 ```
 

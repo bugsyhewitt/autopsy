@@ -18,6 +18,7 @@ run without a compiler. This file documents how to regenerate them if needed.
 | `cwe377-vuln.c` / `cwe377-vuln` | source + binary: insecure temporary files (`tmpnam`/`mktemp`/`tempnam`); the atomic `mkstemp()` in `safe_create()` must not be flagged |
 | `cwe732-vuln.c` / `cwe732-vuln` | source + binary: incorrect permission assignment (`chmod(path,0777)`/`chmod(path,0666)`/`umask(0)`); the restrictive `chmod(path,0600)` in `lock_down()` and `umask(0077)` in `tight_umask()` must not be flagged |
 | `cwe367-vuln.c` / `cwe367-vuln` | source + binary: TOCTOU race (`access`→`open`, `stat`→`fopen`, `lstat`→`unlink`); the descriptor-based `safe_open_then_fstat()` and the single-sided `only_check()`/`only_use()` must not be flagged |
+| `cwe476-vuln.c` / `cwe476-vuln` | source + binary: NULL pointer dereference (`malloc()` result dereferenced with no NULL-check in `risky_fill()`); the NULL-checked `safe_fill()` and `safe_env()` must not be flagged |
 | `cwe78-aarch64-vuln.c` + `cwe78-aarch64-stubs.c` / `cwe78-aarch64-vuln` | source + binary: **AArch64** OS command injection (exercises ARM64 support) |
 | `clean-baseline.c` / `clean-baseline` | source + binary: none of the four classes (zero-false-positive check) |
 | `Makefile` | build rules |
@@ -83,6 +84,13 @@ pytest -m slow
   mode/mask values as compile-time octal literals — the detector reads the
   immediate out of the mode-argument register (`esi`/`edx`/`edi`); a mode
   computed at runtime is intentionally not flagged.
+- The `cwe476-vuln` fixture dereferences a `malloc()` result with no NULL-check
+  in `risky_fill()` (the CWE-476 hit), alongside `safe_fill()` (which guards the
+  result with `if (p == NULL) return`) and `safe_env()` (which NULL-checks the
+  `getenv()` result) — both must remain **unflagged**. Keep `-O0` so the
+  allocator result is spilled to a stack slot and the NULL-check stays a visible
+  `cmp`/`test` + conditional branch; the detector recognizes that guard and is
+  silent on the safe companions.
 
 ## AArch64 (ARM64) fixture
 
