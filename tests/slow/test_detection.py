@@ -140,6 +140,31 @@ def test_cwe476_detected(require_angr, fixtures_dir):
     assert "malloc" in vuln[0]["evidence"]
 
 
+def test_cwe401_detected(require_angr, fixtures_dir):
+    # Memory leak: leaky() allocates a heap buffer and returns without freeing
+    # it and without transferring ownership. safe_free()/safe_return()/
+    # safe_handoff()/safe_stash() each exercise one of the four
+    # ownership-transfer paths the detector recognizes (free, return-the-
+    # pointer, pass-as-argument, store-to-memory) and MUST NOT fire.
+    rep = _analyze(fixtures_dir, "cwe401-vuln", "401")
+    d = rep.to_dict()
+    assert d["error"] is None
+    cwe401 = [f for f in d["findings"] if f["cwe"] == 401]
+    assert cwe401, f"expected a CWE-401 finding, got {d['findings']}"
+    vuln = [f for f in cwe401 if f["function"] == "leaky"]
+    assert vuln, f"expected the unfreed allocation in leaky(), got {cwe401}"
+    _assert_finding_contract(vuln[0], 401)
+    # Each safe companion must stay silent (zero-false-positive contract).
+    for safe_fn in ("safe_free", "safe_return", "safe_handoff", "safe_stash"):
+        assert all(f["function"] != safe_fn for f in cwe401), (
+            f"the {safe_fn} ownership-transfer must not fire: {cwe401}"
+        )
+    # Unfreed owned allocator -> medium confidence (structural signal).
+    assert vuln[0]["confidence"] == "medium"
+    assert "malloc" in vuln[0]["evidence"]
+    assert "leaks" in vuln[0]["evidence"]
+
+
 def test_cwe78_detected(require_angr, fixtures_dir):
     rep = _analyze(fixtures_dir, "cwe78-vuln", "78")
     d = rep.to_dict()

@@ -244,6 +244,48 @@ directly). Scope carefully to avoid overrun.
 
 ---
 
+### Additional shipped detector — Memory leak (CWE-401) ✅ IMPLEMENTED (Rotation 32)
+
+**Status:** Shipped. A new CWE-401 (Missing Release of Memory after Effective
+Lifetime) check detects the canonical intra-procedural leak: a call to an
+*owned* allocator (`malloc`/`calloc`/`realloc`/`reallocarray`/`strdup`/
+`strndup`) whose result is spilled to a stack slot and where the function
+returns without **any** of the four common ownership-transfer paths — no
+`free()`/`realloc()`/`reallocarray()` release of the slot, no reload of the
+slot into the return register (`rax` on x86_64, `x0` on AArch64) before a
+`ret`, no reload of the slot into an integer argument register before a
+non-release call, and no store of an aliasing register to memory other than
+the original spill slot. The engine helper
+`AngrEngine.unfreed_allocations()` does the disassembly-level work, with
+parallel x86_64 (SysV) and AArch64 (AAPCS64) walkers selected from
+`project.arch.name`. `getenv`/`secure_getenv` are deliberately excluded from
+the owned-allocator set — their return values point at libc-owned
+environment storage that the caller must not free — so an unfreed `getenv()`
+is never a leak (CWE-476 still tracks it for unchecked dereferences). The
+check (`autopsy/checks/cwe401.py`) carries `confidence: "medium"`: an owned
+allocator with no observed release or escape is a strong structural leak
+signal, but the intra-procedural slot tracking is not a full ownership proof
+(an alias path the scanner does not recognize could legitimately transfer
+ownership without being visible). A new fixture
+`tests/fixtures/cwe401-vuln.c` exercises the vulnerable `leaky()` (no
+release, no escape — fires) against four ownership-transfer companions
+(`safe_free()` releases via `free`; `safe_return()` returns the pointer;
+`safe_handoff()` passes it to another function; `safe_stash()` stores it to
+a global) that must each stay silent. The check is registered in `CHECKS`,
+`"401"` is a valid `--checks` token, and CWE-401 has a canonical entry in
+`CWE_CATALOG` so `--list-checks` and the SARIF rule descriptor share the
+same metadata. CWE-401 is a perennial top-class weakness — long-running
+services accumulate leaks into OOMs and DoS surfaces.
+
+**Pivot note (R32):** The suggested CWE-190 (integer overflow) and CWE-416
+(use-after-free) detectors were already shipped and arch-aware by R31, so
+this rotation picked the next-best unimplemented memory-safety gap. CWE-401
+is the natural sibling to CWE-415/416/476 (it reuses the same allocator-
+slot tracking machinery the others built up) and was not in the prior
+Tier 1/2 list, making it a clean additive ship.
+
+---
+
 ### Additional shipped detector — Out-of-bounds read (CWE-125) ✅ IMPLEMENTED (Rotation 31)
 
 **Status:** Shipped. A new CWE-125 (Out-of-Bounds Read) check ships as the

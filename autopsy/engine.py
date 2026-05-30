@@ -197,7 +197,7 @@ class AngrEngine:
     #
     # All register-level checks are now arch-aware; no check is skipped on
     # AArch64.
-    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 119, 125, 134, 190, 338, 367, 369, 377, 415, 416, 476, 676, 732, 787)
+    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 119, 125, 134, 190, 338, 367, 369, 377, 401, 415, 416, 476, 676, 732, 787)
 
     def assert_supported(self) -> None:
         """Reject targets on architectures autopsy cannot analyze.
@@ -2350,6 +2350,441 @@ class AngrEngine:
                     pending_check = (target, insn.address)
 
         return results
+
+    # --- CWE-401 (Memory leak) -------------------------------------------
+    #
+    # NULL-returning allocators whose returned pointer the caller OWNS and is
+    # therefore expected to free. Deliberately excludes ``getenv`` and
+    # ``secure_getenv``: their return values point at process-environment
+    # storage owned by libc and must NOT be freed by the caller, so an unfreed
+    # ``getenv`` result is not a leak.
+    _OWNED_ALLOCATORS: frozenset[str] = frozenset({
+        "malloc", "calloc", "realloc", "reallocarray",
+        "strdup", "strndup",
+    })
+
+    # Functions that release the heap pointer passed as their first argument.
+    # ``realloc(p, n)`` with ``n == 0`` is implementation-defined but the
+    # common-case effect is "may free p" — we treat any ``realloc`` call whose
+    # first argument aliases our slot as a release of that slot, on the
+    # conservative side of zero-false-positives. ``free`` is the canonical case.
+    _RELEASE_FNS: frozenset[str] = frozenset({"free", "realloc", "reallocarray"})
+
+    # SysV AMD64 integer-argument registers (caller-set before ``call``). Any
+    # alias of our slot loaded into one of these before a call means the
+    # pointer is handed out of the function — we treat that as an escape and
+    # skip the leak finding (the callee may take ownership / store it / free it).
+    _AMD64_ARG_REGS: tuple[str, ...] = ("rdi", "rsi", "rdx", "rcx", "r8", "r9")
+    # AAPCS64 integer-argument registers.
+    _AARCH64_ARG_REGS: tuple[str, ...] = (
+        "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7",
+    )
+
+    def unfreed_allocations(self) -> list[dict[str, Any]]:
+        """Find owned-allocator calls whose result is never freed and never escapes.
+
+        Detects the CWE-401 (Missing Release of Memory after Effective
+        Lifetime) pattern intra-procedurally: a call to a NULL-returning
+        *owned* allocator (``malloc``/``calloc``/``realloc``/``reallocarray``/
+        ``strdup``/``strndup``) whose result the caller owns, where the
+        function exits without:
+
+          * passing an aliasing register to ``free``/``realloc``/``reallocarray``
+            (a release of the slot), or
+          * loading the slot value into the return register
+            (``rax`` on x86_64, ``x0`` on AArch64) before a ``ret`` (ownership
+            transferred to the caller), or
+          * loading the slot value into any integer-argument register before
+            any other call (ownership handed to a callee), or
+          * storing the slot value into any memory operand other than the
+            original spill slot (ownership stored somewhere persistent).
+
+        Each of those four escape paths is treated as evidence that ownership
+        leaves the function; absent all four, the allocation is leaked when the
+        function returns.
+
+        Returns one dict per leaked allocation:
+        ``{"address": int, "function": str, "alloc_name": str,
+        "alloc_address": int, "slot": str}`` — ``address`` is the allocator
+        call (the leak's anchor), matching how CWE-415/416 anchor on the
+        misuse site.
+
+        Zero-false-positive posture: ``getenv``/``secure_getenv`` return
+        environment-owned storage the caller must *not* free, and are
+        deliberately excluded from the allocator set. Any escape suppresses the
+        finding — including a slot reload into a call argument register
+        (passing the pointer to another function transfers responsibility) and
+        a slot reload into the return register (returning the pointer
+        transfers ownership). A result that is never spilled to a stack slot
+        cannot be tracked and is skipped (conservative false-negative).
+
+        Arch-aware: x86_64 (SysV) uses the ``rax`` return / ``rdi``-``r9``
+        arg-register set / Intel-syntax spill (``mov [rbp-N], rax``). AArch64
+        (AAPCS64) uses the ``x0`` return / ``x0``-``x7`` arg-register set /
+        AArch64-syntax spill (``str x0, [sp,#N]``). On any other architecture
+        this returns an empty list.
+        """
+        arch = self.project.arch.name
+        if arch == "AMD64":
+            return self._unfreed_allocations_amd64()
+        if arch == "AARCH64":
+            return self._unfreed_allocations_aarch64()
+        return []
+
+    def _unfreed_allocations_amd64(self) -> list[dict[str, Any]]:
+        """x86_64 (SysV) implementation of :meth:`unfreed_allocations`."""
+        import re
+
+        cfg = self.cfg()
+        call_mnemonics = self._call_mnemonics()
+
+        # rax (or eax) spilled to a stack slot right after the alloc returns.
+        store_rax = re.compile(
+            r"^(?:qword ptr )?\[(rbp|rsp)\s*([+\-]\s*(?:0x[0-9a-f]+|\d+))\],\s*(rax|eax)$"
+        )
+        # reg <- [slot]: a reload of the slot into a register.
+        load_slot = re.compile(
+            r"^(r[a-z0-9]+),\s*(?:qword ptr )?\[(rbp|rsp)\s*([+\-]\s*(?:0x[0-9a-f]+|\d+))\]$"
+        )
+        # reg <- reg: register-copy alias propagation.
+        reg_copy = re.compile(r"^(r[a-z0-9]+),\s*(r[a-z0-9]+)$")
+        # mov [<mem>], reg: stores of an aliasing register to memory.
+        store_to_mem = re.compile(r"^(?:qword ptr )?\[(.+?)\],\s*(r[a-z0-9]+)$")
+
+        results: list[dict[str, Any]] = []
+        for func in cfg.kb.functions.values():
+            if getattr(func, "is_plt", False) or getattr(func, "is_simprocedure", False):
+                continue
+            insns: list[Any] = []
+            for block in func.blocks:
+                try:
+                    insns.extend(block.capstone.insns)
+                except Exception:  # pragma: no cover - defensive
+                    continue
+            insns.sort(key=lambda i: i.address)
+
+            for idx, insn in enumerate(insns):
+                if insn.mnemonic not in call_mnemonics:
+                    continue
+                target = self._resolve_call_target(insn, cfg)
+                if target not in self._OWNED_ALLOCATORS:
+                    continue
+
+                # Find the slot the result (rax) is spilled into in the few
+                # instructions immediately after the call. An untracked result
+                # is conservatively skipped (false-negative).
+                slot: str | None = None
+                spill_idx = idx
+                for j in range(idx + 1, min(idx + 5, len(insns))):
+                    if insns[j].mnemonic == "mov":
+                        ms = store_rax.match(insns[j].op_str)
+                        if ms:
+                            slot = f"{ms.group(1)}{ms.group(2).replace(' ', '')}"
+                            spill_idx = j
+                            break
+                    # A second call before the spill clobbers rax -> give up.
+                    if insns[j].mnemonic in call_mnemonics:
+                        break
+                if slot is None:
+                    continue
+
+                if self._is_leaked_amd64(
+                    insns, spill_idx, slot, cfg,
+                    load_slot, reg_copy, store_to_mem,
+                    call_mnemonics,
+                ):
+                    results.append(
+                        {
+                            "address": insn.address,
+                            "function": func.name,
+                            "alloc_name": target,
+                            "alloc_address": insn.address,
+                            "slot": slot,
+                        }
+                    )
+
+        return results
+
+    def _is_leaked_amd64(
+        self, insns, spill_idx, slot, cfg,
+        load_slot, reg_copy, store_to_mem, call_mnemonics,
+    ) -> bool:
+        """True if the slot is never freed and never escapes the function.
+
+        Scans forward from the spill. Builds the set of registers aliasing
+        ``slot`` (slot reloads + reg-to-reg copies). Returns ``False`` as soon
+        as any escape is observed: a release call (``free``/``realloc``) whose
+        first-arg register aliases the slot, a non-release call where any
+        argument register aliases the slot, a store of an aliasing register to
+        memory (other than the original slot), or a ``ret`` where ``rax``
+        aliases the slot. Returns ``True`` if scanning reaches the end of the
+        function with no escape seen.
+
+        An aliased register that is overwritten by any non-mov-from-slot
+        instruction (arithmetic like ``add``/``sub``/``xor``, a reload from a
+        different slot, a load of a different value) is dropped from the alias
+        set: the alias only holds while the register continues to carry the
+        pointer value. This is what makes ``leaky()`` distinguishable from
+        ``safe_return()`` — in ``leaky`` the reloaded ``rax`` is mutated
+        (``add $1, %rax`` between the reload and ``ret``), so ``rax`` is no
+        longer an alias at the ``ret`` and the return-escape rule doesn't fire.
+        """
+        alias_regs: set[str] = set()
+        for insn in insns[spill_idx + 1:]:
+            op = insn.op_str
+            mn = insn.mnemonic
+
+            # Slot reload establishes a fresh alias register.
+            if mn == "mov":
+                ml = load_slot.match(op)
+                if ml and \
+                        f"{ml.group(2)}{ml.group(3).replace(' ', '')}" == slot:
+                    alias_regs.add(ml.group(1))
+                    continue
+                # Register-copy propagation of an existing alias.
+                mc = reg_copy.match(op)
+                if mc and mc.group(2) in alias_regs:
+                    alias_regs.add(mc.group(1))
+                    continue
+                # A store of an aliasing register to a memory location other
+                # than the original slot is an escape (the pointer is now
+                # reachable from somewhere outside this function's scratch slot).
+                msm = store_to_mem.match(op)
+                if msm and msm.group(2) in alias_regs:
+                    mem = msm.group(1).replace(" ", "")
+                    # Match the original spill slot string for suppression.
+                    if mem != slot and not mem.endswith(slot):
+                        return False
+                    continue
+                # A mov that writes one of our alias registers (e.g. reloaded
+                # from elsewhere, or zeroed) drops it from the alias set —
+                # except when the destination is the alias itself unchanged,
+                # which the reg_copy branch already handled.
+                dst = op.split(",", 1)[0].strip()
+                if dst in alias_regs:
+                    alias_regs.discard(dst)
+                continue
+
+            # A call: classify by whether the slot or an alias is in an
+            # argument register.
+            if mn in call_mnemonics:
+                target = self._resolve_call_target(insn, cfg)
+                arg_alias = any(r in alias_regs for r in self._AMD64_ARG_REGS)
+                if target in self._RELEASE_FNS:
+                    # ``free(p)`` / ``realloc(p, n)`` over an aliased rdi: the
+                    # slot is released. Not a leak.
+                    if "rdi" in alias_regs:
+                        return False
+                    # A free/realloc that does not touch our slot still
+                    # clobbers caller-saved registers; drop the alias set as
+                    # the calling convention says (rax/rcx/rdx/rdi/rsi/r8-r11
+                    # are caller-saved). Conservatively, drop all aliases.
+                    alias_regs.clear()
+                    continue
+                # A non-release call where any aliasing register is in the
+                # arg-register set: the pointer escapes to the callee.
+                if arg_alias:
+                    return False
+                # Otherwise the call doesn't see our pointer; drop caller-saved
+                # alias registers (anything in the arg-register set or rax).
+                alias_regs.difference_update(self._AMD64_ARG_REGS)
+                alias_regs.discard("rax")
+                alias_regs.discard("eax")
+                continue
+
+            # A return where rax (or an alias of it) holds the slot value is
+            # an ownership transfer to the caller -> not a leak.
+            if mn == "ret":
+                if "rax" in alias_regs:
+                    return False
+                # End of this function path; if we get here we have not seen
+                # any escape, so this allocator call is leaked. (Multiple
+                # ``ret`` instructions are possible; the first reached without
+                # an escape is enough to lock in the finding.)
+                return True
+
+            # Any other instruction whose first operand is an aliased
+            # register mutates that register (e.g. ``add $1, %rax``,
+            # ``xor %rax, %rax``, ``lea (%rax,%rcx,1), %rdx``) — drop the
+            # register from the alias set. Memory operands (``[rax]``,
+            # ``[rax+8]``) are dereferences of the pointer value, not writes
+            # to the register, so they don't drop the alias.
+            if alias_regs:
+                # Capstone op_str: first comma-separated token is the
+                # destination on x86. A bracketed destination is a memory
+                # write, not a register write — skip those.
+                first = op.split(",", 1)[0].strip()
+                if first and not first.startswith("[") and \
+                        "ptr" not in first and first in alias_regs:
+                    alias_regs.discard(first)
+
+        # Function ended without an explicit ret in the linear scan (rare under
+        # capstone block flattening). If we saw no escape, treat as leaked.
+        return True
+
+    def _unfreed_allocations_aarch64(self) -> list[dict[str, Any]]:
+        """AArch64 (AAPCS64) implementation of :meth:`unfreed_allocations`."""
+        import re
+
+        cfg = self.cfg()
+        call_mnemonics = self._call_mnemonics()
+
+        store_x0 = re.compile(
+            r"^x0,\s*\[(sp|x29|fp)(?:,\s*(#[+\-]?(?:0x[0-9a-f]+|\d+)))?\]$"
+        )
+        load_slot = re.compile(
+            r"^(x[0-9]+),\s*\[(sp|x29|fp)(?:,\s*(#[+\-]?(?:0x[0-9a-f]+|\d+)))?\]$"
+        )
+        reg_copy = re.compile(r"^(x[0-9]+),\s*(x[0-9]+)$")
+        # ``str xR, [base, #N]``: a store of register xR through a base. We
+        # treat any store of an aliasing register to a memory location other
+        # than the original slot as an escape.
+        store_xr = re.compile(
+            r"^(x[0-9]+),\s*\[(.+?)\]$"
+        )
+
+        results: list[dict[str, Any]] = []
+        for func in cfg.kb.functions.values():
+            if getattr(func, "is_plt", False) or getattr(func, "is_simprocedure", False):
+                continue
+            insns: list[Any] = []
+            for block in func.blocks:
+                try:
+                    insns.extend(block.capstone.insns)
+                except Exception:  # pragma: no cover - defensive
+                    continue
+            insns.sort(key=lambda i: i.address)
+
+            for idx, insn in enumerate(insns):
+                if insn.mnemonic not in call_mnemonics:
+                    continue
+                target = self._resolve_call_target(insn, cfg)
+                if target not in self._OWNED_ALLOCATORS:
+                    continue
+
+                slot: str | None = None
+                spill_idx = idx
+                for j in range(idx + 1, min(idx + 5, len(insns))):
+                    nxt = insns[j]
+                    if nxt.mnemonic == "str":
+                        ms = store_x0.match(nxt.op_str)
+                        if ms:
+                            off = ms.group(2) if ms.lastindex and ms.lastindex >= 2 else None
+                            if off is None:
+                                off = "+0"
+                            slot = f"{ms.group(1)}{off.replace(' ', '').lstrip('#')}"
+                            spill_idx = j
+                            break
+                    if nxt.mnemonic in call_mnemonics:
+                        break
+                if slot is None:
+                    continue
+
+                if self._is_leaked_aarch64(
+                    insns, spill_idx, slot, cfg,
+                    load_slot, reg_copy, store_xr, call_mnemonics,
+                ):
+                    results.append(
+                        {
+                            "address": insn.address,
+                            "function": func.name,
+                            "alloc_name": target,
+                            "alloc_address": insn.address,
+                            "slot": slot,
+                        }
+                    )
+
+        return results
+
+    def _is_leaked_aarch64(
+        self, insns, spill_idx, slot, cfg,
+        load_slot, reg_copy, store_xr, call_mnemonics,
+    ) -> bool:
+        """AArch64 mirror of :meth:`_is_leaked_amd64`."""
+        alias_regs: set[str] = set()
+        for insn in insns[spill_idx + 1:]:
+            op = insn.op_str
+            mn = insn.mnemonic
+
+            # Slot reload (``ldr xR, [base, #N]``) establishes an alias.
+            if mn == "ldr":
+                ml = load_slot.match(op)
+                if ml:
+                    base = ml.group(2)
+                    off = ml.group(3) if ml.lastindex and ml.lastindex >= 3 else None
+                    if off is None:
+                        off = "+0"
+                    key = f"{base}{off.replace(' ', '').lstrip('#')}"
+                    if key == slot:
+                        alias_regs.add(ml.group(1))
+                        continue
+                    # A reload from a different slot: the dest register may
+                    # have aliased our slot earlier; drop it from the set.
+                    dst = ml.group(1)
+                    alias_regs.discard(dst)
+                continue
+
+            # Register-copy propagation.
+            if mn == "mov":
+                mc = reg_copy.match(op)
+                if mc:
+                    src = mc.group(2)
+                    dst = mc.group(1)
+                    if src in alias_regs:
+                        alias_regs.add(dst)
+                        continue
+                    # Destination overwritten by a non-alias source -> drop.
+                    alias_regs.discard(dst)
+                continue
+
+            # A store ``str xR, [...]`` where xR aliases our slot: escape if
+            # the destination is not the original slot.
+            if mn in ("str", "stur"):
+                msx = store_xr.match(op)
+                if msx and msx.group(1) in alias_regs:
+                    mem = msx.group(2).replace(" ", "")
+                    # The original slot is e.g. "sp+8" or "x29-16"; capstone
+                    # renders mem operands as ``sp, #0x8`` -> normalize.
+                    base_off = mem.replace(",#", "").replace(",", "")
+                    # Strip leading '#' from offset for comparison.
+                    norm = base_off.replace("#", "")
+                    if norm != slot:
+                        return False
+                continue
+
+            # A call (``bl`` on AArch64): classify by arg-register aliasing.
+            if mn in call_mnemonics:
+                target = self._resolve_call_target(insn, cfg)
+                arg_alias = any(r in alias_regs for r in self._AARCH64_ARG_REGS)
+                if target in self._RELEASE_FNS:
+                    if "x0" in alias_regs:
+                        return False
+                    # Caller-saved registers are clobbered by the call.
+                    alias_regs.clear()
+                    continue
+                if arg_alias:
+                    return False
+                # Drop caller-saved alias regs (x0-x17 are caller-saved on AAPCS64).
+                alias_regs -= {f"x{i}" for i in range(18)}
+                continue
+
+            # A return where x0 aliases the slot is an ownership transfer.
+            if mn == "ret":
+                if "x0" in alias_regs:
+                    return False
+                return True
+
+            # Any other instruction whose first operand is an aliased
+            # register mutates that register (``add x0, x0, #1``,
+            # ``orr x9, xzr, #0``, ``ldr x9, [some-other-place]``) — drop
+            # the register from the alias set. Memory operands ``[xR]`` are
+            # dereferences, not writes, and don't drop the alias.
+            if alias_regs:
+                first = op.split(",", 1)[0].strip()
+                if first and not first.startswith("[") and first in alias_regs:
+                    alias_regs.discard(first)
+
+        return True
 
     def _resolve_call_target(self, insn: Any, cfg: Any) -> str | None:
         """Resolve a call instruction's target to a symbol name if possible.
