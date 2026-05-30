@@ -203,7 +203,7 @@ class AngrEngine:
     #
     # All register-level checks are now arch-aware; no check is skipped on
     # AArch64.
-    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 119, 125, 134, 190, 338, 362, 367, 369, 377, 401, 415, 416, 476, 676, 732, 787)
+    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (22, 78, 119, 125, 134, 190, 338, 362, 367, 369, 377, 401, 415, 416, 476, 676, 732, 787)
 
     def assert_supported(self) -> None:
         """Reject targets on architectures autopsy cannot analyze.

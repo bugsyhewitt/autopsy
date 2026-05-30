@@ -13,16 +13,21 @@ from __future__ import annotations
 from typing import Any
 
 # The whole-program CWE classes autopsy detects.
-SUPPORTED_CWES: tuple[int, ...] = (119, 125, 190, 338, 362, 367, 369, 377, 401, 415, 416, 476, 78, 134, 676, 732, 787)
+SUPPORTED_CWES: tuple[int, ...] = (22, 119, 125, 190, 338, 362, 367, 369, 377, 401, 415, 416, 476, 78, 134, 676, 732, 787)
 
 # Valid tokens accepted by --checks.
-VALID_TOKENS: tuple[str, ...] = ("119", "125", "190", "338", "362", "367", "369", "377", "401", "415", "416", "476", "78", "134", "676", "732", "787", "all")
+VALID_TOKENS: tuple[str, ...] = ("22", "119", "125", "190", "338", "362", "367", "369", "377", "401", "415", "416", "476", "78", "134", "676", "732", "787", "all")
 
 # Canonical, human-readable metadata for every CWE autopsy detects. Keyed by
 # CWE id. ``name`` is the full MITRE title, ``short`` a terse label, ``uri`` the
 # MITRE definition URL. Single source of truth: ``--list-checks`` renders this
 # and the SARIF generator imports it for rule descriptions.
 CWE_CATALOG: dict[int, dict[str, str]] = {
+    22: {
+        "name": "Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')",
+        "short": "Path Traversal",
+        "uri": "https://cwe.mitre.org/data/definitions/22.html",
+    },
     78: {
         "name": "Improper Neutralization of Special Elements used in an OS Command",
         "short": "OS Command Injection",
@@ -145,8 +150,9 @@ def resolve_checks(token: str) -> list[int]:
     """Resolve a ``--checks`` token into an ordered list of CWE ids.
 
     Args:
-        token: One of "119", "190", "338", "367", "369", "377", "415", "416",
-            "476", "78", "134", "676", "732", "787", or "all".
+        token: One of "22", "78", "119", "125", "134", "190", "338", "362",
+            "367", "369", "377", "401", "415", "416", "476", "676", "732",
+            "787", or "all".
 
     Returns:
         Ordered list of CWE ids to run. "all" expands to every supported CWE
@@ -157,7 +163,7 @@ def resolve_checks(token: str) -> list[int]:
     """
     if token == "all":
         return list(SUPPORTED_CWES)
-    if token in {"119", "125", "190", "338", "362", "367", "369", "377", "401", "415", "416", "476", "78", "134", "676", "732", "787"}:
+    if token in {"22", "119", "125", "190", "338", "362", "367", "369", "377", "401", "415", "416", "476", "78", "134", "676", "732", "787"}:
         return [int(token)]
     raise ValueError(
         f"unknown check token {token!r}; expected one of {', '.join(VALID_TOKENS)}"

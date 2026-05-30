@@ -235,6 +235,24 @@ def test_cwe134_detected(require_angr, fixtures_dir):
     assert "printf" in vuln[0]["evidence"]
 
 
+def test_cwe22_detected(require_angr, fixtures_dir):
+    # Path traversal: serve_file() concatenates attacker-controlled input onto
+    # a directory prefix and passes the result to fopen() with no
+    # realpath()/canonicalize_file_name() sanitization. The fopen() call site
+    # must be flagged.
+    rep = _analyze(fixtures_dir, "cwe22-vuln", "22")
+    d = rep.to_dict()
+    assert d["error"] is None
+    cwe22 = [f for f in d["findings"] if f["cwe"] == 22]
+    assert cwe22, f"expected a CWE-22 finding, got {d['findings']}"
+    _assert_finding_contract(cwe22[0], 22)
+    vuln = [f for f in cwe22 if f["function"] == "serve_file"]
+    assert vuln, f"expected the fopen finding in serve_file(), got {cwe22}"
+    # fopen is in the state-changing sink set -> medium confidence.
+    assert vuln[0]["confidence"] == "medium"
+    assert "fopen" in vuln[0]["evidence"]
+
+
 def test_cwe676_detected(require_angr, fixtures_dir):
     # Use of potentially dangerous functions: the fixture calls gets(), strcpy()
     # and sprintf(). The call-site-driven check must flag each.

@@ -47,7 +47,7 @@ autopsy --version
 ## Usage
 
 ```
-autopsy --binary PATH [--checks {119,125,190,338,362,367,369,377,401,415,416,78,134,676,732,787,all}] [--max-states N]
+autopsy --binary PATH [--checks {22,119,125,190,338,362,367,369,377,401,415,416,78,134,676,732,787,all}] [--max-states N]
         [--format json|sarif] [--fail-on LEVEL] [--baseline PATH] [--write-baseline PATH]
 autopsy --list-checks [--format json]
 ```
@@ -172,8 +172,8 @@ never written from, nor applied to, a half-finished run.
 
 | Architecture | Checks that run |
 |---|---|
-| **x86_64 (AMD64)** | all checks (CWE-119, 125, 190, 338, 362, 367, 369, 377, 401, 415, 416, 476, 78, 134, 676, 732, 787) |
-| **AArch64 (ARM64)** | all checks — the call-site-driven checks (**CWE-78**, **CWE-125**, **CWE-338**, **CWE-362**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**, **CWE-134**, **CWE-401**, **CWE-415**, **CWE-416**, **CWE-369**, **CWE-119**, **CWE-787**, **CWE-476**) |
+| **x86_64 (AMD64)** | all checks (CWE-22, 78, 119, 125, 134, 190, 338, 362, 367, 369, 377, 401, 415, 416, 476, 676, 732, 787) |
+| **AArch64 (ARM64)** | all checks — the call-site-driven checks (**CWE-22**, **CWE-78**, **CWE-125**, **CWE-338**, **CWE-362**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**, **CWE-134**, **CWE-401**, **CWE-415**, **CWE-416**, **CWE-369**, **CWE-119**, **CWE-787**, **CWE-476**) |
 
 On an AArch64 target, the **CWE-732** permission check runs natively: its register
 reasoning only reads a single mode/mask *immediate* out of the AAPCS64 argument
@@ -247,9 +247,9 @@ check is arch-aware and nothing is skipped on AArch64. The report's
 
 ```json
 {
-  "checks": [119, 125, 190, 338, 362, 367, 369, 377, 401, 415, 416, 476, 78, 134, 676, 732, 787],
+  "checks": [22, 119, 125, 190, 338, 362, 367, 369, 377, 401, 415, 416, 476, 78, 134, 676, 732, 787],
   "skipped_checks": [],
-  "findings": [ /* CWE-78 / 119 / 134 / 190 / 338 / 362 / 367 / 369 / 377 / 415 / 416 / 476 / 676 / 732 / 787 findings */ ]
+  "findings": [ /* CWE-22 / 78 / 119 / 134 / 190 / 338 / 362 / 367 / 369 / 377 / 415 / 416 / 476 / 676 / 732 / 787 findings */ ]
 }
 ```
 
@@ -587,6 +587,46 @@ autopsy --binary tests/fixtures/cwe78-vuln --checks 78 --format json
   "confidence": "medium"
 }
 ```
+
+### CWE-22 — path traversal (improper limitation of a pathname to a restricted directory)
+
+Attacker-controlled input reaches a filesystem path sink
+(`fopen`/`open`/`openat`/`unlink`/`rename`/`stat`/`opendir`/`chmod`/`chown`/
+`symlink`/`link`/`mkdir`/`rmdir`/`chdir`/`chroot`/`truncate`/`readlink` and
+their `*64`/`*at` variants) with no observed call to a path-canonicalization
+helper (`realpath`/`canonicalize_file_name`). The classic exploit shape is
+`fopen("/var/www/uploads/" + user_input, "r")` where `user_input` contains
+`../../etc/passwd` to escape the intended directory.
+
+```bash
+autopsy --binary tests/fixtures/cwe22-vuln --checks 22 --format json
+```
+
+```json
+{
+  "cwe": 22,
+  "function": "serve_file",
+  "address": "0x4011aa",
+  "taint_trace": [
+    {"address": "0x4011fc", "description": "attacker-controlled input read via fgets()"},
+    {"address": "0x4011aa", "description": "tainted data reaches filesystem path sink fopen()"}
+  ],
+  "evidence": "call to fopen() in serve_file with program input read via fgets() and no path canonicalization (realpath/canonicalize_file_name) observed in the binary",
+  "confidence": "medium"
+}
+```
+
+Confidence is `medium` for state-changing sinks (open-for-write, unlink,
+rename, chmod, chown, chroot, truncate, symlink, link, mkdir, rmdir, fopen,
+creat, openat) where a traversal lets the attacker mutate filesystem state
+outside the intended directory, and `low` for read-only metadata sinks
+(stat/lstat/access/readlink/opendir/chdir) where the attacker can observe but
+not modify. Like CWE-78, this is a call-site-driven check — it runs on both
+x86_64 and AArch64. `getenv()`/`secure_getenv()` count as attacker-influenced
+input sources (the typical `fopen(getenv("HOME"))` setuid path-traversal
+vector). If the binary calls `realpath()` or `canonicalize_file_name()`
+anywhere, the check suppresses all CWE-22 findings to preserve autopsy's
+zero-false-positive posture on properly-sanitizing programs.
 
 ### CWE-134 — uncontrolled (externally-controlled) format string
 
