@@ -9,6 +9,7 @@ run without a compiler. This file documents how to regenerate them if needed.
 | File | Role |
 |---|---|
 | `cwe119-vuln.c` / `cwe119-vuln` | source + binary: buffer over-read/write via attacker-controlled offset |
+| `cwe125-vuln.c` / `cwe125-vuln` | source + binary: out-of-bounds heap *read* via malloc + bulk-read taint mismatch (`compare_from_heap()` malloc(size) + memcmp(buf, needle, length) fires; `safe_compare()` uses a literal 4-byte length and must not be flagged) |
 | `cwe190-vuln.c` / `cwe190-vuln` | source + binary: integer overflow into allocator size |
 | `cwe416-vuln.c` / `cwe416-vuln` | source + binary: intra-procedural use-after-free |
 | `cwe416-interproc-vuln.c` / `cwe416-interproc-vuln` | source + binary: single-hop **interprocedural** use-after-free (free in callee, use in caller) |

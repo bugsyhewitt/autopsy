@@ -244,6 +244,38 @@ directly). Scope carefully to avoid overrun.
 
 ---
 
+### Additional shipped detector — Out-of-bounds read (CWE-125) ✅ IMPLEMENTED (Rotation 31)
+
+**Status:** Shipped. A new CWE-125 (Out-of-Bounds Read) check ships as the
+read-side complement of CWE-787. The detection model mirrors CWE-787's
+malloc + bulk-sink co-location heuristic, just against read-shaped sinks —
+`memcmp`/`strncmp`/`strncasecmp`/`memchr` — instead of write-shaped ones. A
+finding fires when a function contains both an allocator
+(`malloc`/`calloc`/`realloc`/`reallocarray`) call and at least one of those
+bulk-read sinks whose length argument is *not* a compile-time literal, and
+the program contains at least one attacker-controlled input source (same
+`_SOURCES` set as CWE-787/CWE-190). Literal-length reads (e.g.
+`memcmp(buf, magic, 4)`) are suppressed by the existing
+`engine.copy_call_length_is_literal` helper — the read sinks were added to
+both the SysV (`_COPY_SINK_LEN_REG`: `rdx`) and AAPCS64
+(`_COPY_SINK_LEN_REG_AARCH64`: `x2`) length-register maps, so the suppression
+generalizes transparently and CWE-125 is **arch-agnostic** on both x86_64
+and AArch64 (it lives in `_ARCH_AGNOSTIC_CHECKS`). Findings carry
+`confidence: "medium"` — the alloc/read mismatch is a tight structural
+signal but the analysis does not symbolically prove M > N on all paths
+(same disclosure as CWE-787). A new fixture `tests/fixtures/cwe125-vuln.c`
+exercises the vulnerable `compare_from_heap()` (malloc + memcmp with a
+non-literal length — fires) alongside a safe `safe_compare()` companion
+(memcmp with a 4-byte literal — must not fire), and a freestanding slow
+test locks the contract. The check is registered in `CHECKS`, `"125"` is a
+valid `--checks` token, and CWE-125 has a canonical entry in `CWE_CATALOG`
+so `--list-checks` and the SARIF rule descriptor share the same metadata.
+CWE-125 is rank #6 on the 2025 MITRE/CISA CWE Top 25 with 12 CISA KEV
+entries (actively exploited) — the highest-leverage memory-safety gap
+remaining after CWE-787.
+
+---
+
 ### 5. Out-of-bounds write (CWE-787) distinct from CWE-119
 
 **What it is:** Add an explicit CWE-787 check that targets heap-buffer writes
