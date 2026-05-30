@@ -12,7 +12,7 @@ from typing import Callable
 
 from autopsy.report import Finding
 
-from autopsy.checks import cwe119, cwe125, cwe134, cwe190, cwe338, cwe367, cwe369, cwe377, cwe401, cwe415, cwe416, cwe476, cwe676, cwe732, cwe78, cwe787
+from autopsy.checks import cwe119, cwe125, cwe134, cwe190, cwe338, cwe362, cwe367, cwe369, cwe377, cwe401, cwe415, cwe416, cwe476, cwe676, cwe732, cwe78, cwe787
 
 # CWE id -> check callable.
 CHECKS: dict[int, Callable[[object], list[Finding]]] = {
@@ -20,6 +20,7 @@ CHECKS: dict[int, Callable[[object], list[Finding]]] = {
     125: cwe125.run,
     190: cwe190.run,
     338: cwe338.run,
+    362: cwe362.run,
     367: cwe367.run,
     369: cwe369.run,
     377: cwe377.run,
