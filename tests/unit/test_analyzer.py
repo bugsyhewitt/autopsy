@@ -48,10 +48,10 @@ def test_analyze_all_runs_every_check(monkeypatch):
     seen = []
     monkeypatch.setattr(
         "autopsy.checks.CHECKS",
-        {c: (lambda e, c=c: (seen.append(c) or [])) for c in (119, 125, 190, 338, 367, 369, 377, 401, 415, 416, 476, 78, 134, 676, 732, 787)},
+        {c: (lambda e, c=c: (seen.append(c) or [])) for c in (119, 125, 190, 338, 362, 367, 369, 377, 401, 415, 416, 476, 78, 134, 676, 732, 787)},
     )
     rep = analyzer.analyze("bin", "all", engine_factory=_fake_factory)
-    assert seen == [119, 125, 190, 338, 367, 369, 377, 401, 415, 416, 476, 78, 134, 676, 732, 787]
+    assert seen == [119, 125, 190, 338, 362, 367, 369, 377, 401, 415, 416, 476, 78, 134, 676, 732, 787]
     assert rep.findings == []
 
 
@@ -71,10 +71,10 @@ class ArchAwareFakeEngine(FakeEngine):
     """FakeEngine that reports an architecture-driven check partition.
 
     Emulates an AArch64 engine: only the call-site-driven checks (78, 190, 338,
-    367, 377, 676) run; the register-level checks are reported as skipped.
+    362, 367, 377, 676) run; the register-level checks are reported as skipped.
     """
 
-    _RUNNABLE = (78, 190, 338, 367, 377, 676)
+    _RUNNABLE = (78, 190, 338, 362, 367, 377, 676)
 
     def checks_supported_on_arch(self, cwes):
         runnable = [c for c in cwes if c in self._RUNNABLE]
@@ -86,14 +86,14 @@ def test_analyze_skips_unsupported_arch_checks(monkeypatch):
     seen = []
     monkeypatch.setattr(
         "autopsy.checks.CHECKS",
-        {c: (lambda e, c=c: (seen.append(c) or [])) for c in (119, 125, 190, 338, 367, 369, 377, 401, 415, 416, 476, 78, 134, 676, 732, 787)},
+        {c: (lambda e, c=c: (seen.append(c) or [])) for c in (119, 125, 190, 338, 362, 367, 369, 377, 401, 415, 416, 476, 78, 134, 676, 732, 787)},
     )
     rep = analyzer.analyze(
         "bin", "all",
         engine_factory=lambda b, m: ArchAwareFakeEngine(b, m),
     )
-    # Only the arch-agnostic checks actually ran (190, 338, 367, 377, 78, 676).
-    assert seen == [190, 338, 367, 377, 78, 676]
+    # Only the arch-agnostic checks actually ran (190, 338, 362, 367, 377, 78, 676).
+    assert seen == [190, 338, 362, 367, 377, 78, 676]
     # The skipped register-level checks are recorded on the report.
     assert rep.skipped_checks == [119, 125, 369, 401, 415, 416, 476, 134, 732, 787]
     assert rep.to_dict()["skipped_checks"] == [119, 125, 369, 401, 415, 416, 476, 134, 732, 787]
@@ -105,10 +105,10 @@ def test_analyze_no_partition_method_runs_all(monkeypatch):
     seen = []
     monkeypatch.setattr(
         "autopsy.checks.CHECKS",
-        {c: (lambda e, c=c: (seen.append(c) or [])) for c in (119, 125, 190, 338, 367, 369, 377, 401, 415, 416, 476, 78, 134, 676, 732, 787)},
+        {c: (lambda e, c=c: (seen.append(c) or [])) for c in (119, 125, 190, 338, 362, 367, 369, 377, 401, 415, 416, 476, 78, 134, 676, 732, 787)},
     )
     rep = analyzer.analyze("bin", "all", engine_factory=_fake_factory)
-    assert seen == [119, 125, 190, 338, 367, 369, 377, 401, 415, 416, 476, 78, 134, 676, 732, 787]
+    assert seen == [119, 125, 190, 338, 362, 367, 369, 377, 401, 415, 416, 476, 78, 134, 676, 732, 787]
     assert rep.skipped_checks == []
 
 

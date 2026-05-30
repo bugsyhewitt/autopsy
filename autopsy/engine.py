@@ -112,7 +112,13 @@ class AngrEngine:
     #     (dangerous-function use), CWE-377 (insecure temporary file), CWE-338
     #     (weak-PRNG use) and CWE-367 (TOCTOU check->use) are the same shape —
     #     they pair/flag calls by name and never inspect registers, so they are
-    #     sound on AArch64 unchanged.
+    #     sound on AArch64 unchanged. CWE-362 (async-signal-unsafe call in a
+    #     signal handler) is also call-site-driven for the unsafe-call
+    #     enumeration; it adds one narrow form of single-immediate-arg
+    #     resolution (the handler function-pointer passed to ``signal()`` in
+    #     ``rsi``/``x1``) whose engine helper knows the x86_64 ``lea rsi,
+    #     [rip+disp]`` and AArch64 ``adrp``/``add`` page+offset forms, so it
+    #     is sound on AArch64 too.
     #
     # (b) Register-level checks whose register reasoning has been made
     #     arch-aware. CWE-732 (incorrect permission assignment) reads a single
@@ -197,13 +203,13 @@ class AngrEngine:
     #
     # All register-level checks are now arch-aware; no check is skipped on
     # AArch64.
-    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 119, 125, 134, 190, 338, 367, 369, 377, 401, 415, 416, 476, 676, 732, 787)
+    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 119, 125, 134, 190, 338, 362, 367, 369, 377, 401, 415, 416, 476, 676, 732, 787)
 
     def assert_supported(self) -> None:
         """Reject targets on architectures autopsy cannot analyze.
 
         x86_64 (AMD64) is fully supported. AArch64 (ARM64) is supported for the
-        arch-agnostic checks — the call-site-driven ones (CWE-78/338/367/377/
+        arch-agnostic checks — the call-site-driven ones (CWE-78/338/362/367/377/
         676) and the arch-aware register-level checks (CWE-190 integer overflow,
         CWE-732 permission assignment, CWE-134 uncontrolled format string,
         CWE-415 double-free, CWE-416 use-after-free, CWE-369 divide-by-zero,
@@ -2785,6 +2791,301 @@ class AngrEngine:
                     alias_regs.discard(first)
 
         return True
+
+    # --- CWE-362 (signal-handler race / async-signal-unsafe call) ---------
+    #
+    # Signal-installation functions. ``signal(sig, handler)`` and its BSD/SysV
+    # aliases install a function pointer that runs in an asynchronous, possibly
+    # reentrant context (the handler can interrupt the program — including a
+    # libc call already in progress on the same thread). The detector resolves
+    # the *second* argument (the handler function pointer) to its target
+    # function and then scans that function for calls to async-signal-UNSAFE
+    # libc functions, which is the CWE-362 concurrent-use weakness pattern.
+    _SIGNAL_INSTALLERS: frozenset[str] = frozenset({
+        "signal", "__sysv_signal", "bsd_signal", "sysv_signal", "sigset",
+    })
+
+    # POSIX.1-2017 §2.4.3 lists the *async-signal-safe* libc functions
+    # explicitly. Anything outside that list is unsafe to call from a signal
+    # handler — the canonical examples are the buffered-I/O family
+    # (``printf``/``fprintf``/``puts``/``fputs``/``fopen``/``fclose``/
+    # ``fread``/``fwrite``/``fflush``), the dynamic-allocator family
+    # (``malloc``/``calloc``/``realloc``/``reallocarray``/``free``/``strdup``/
+    # ``strndup``), the locale-sensitive scanners/formatters
+    # (``sprintf``/``snprintf``/``sscanf``/``scanf``/``__isoc99_*``/
+    # ``localtime``/``ctime``/``asctime``/``gmtime`` — non-reentrant variants),
+    # and the non-async-safe termination paths (``exit`` runs ``atexit`` hooks
+    # and flushes stdio; ``_Exit`` and ``_exit`` are the safe forms).
+    # ``syslog`` is also explicitly unsafe (the glibc man page calls this out).
+    _ASYNC_SIGNAL_UNSAFE: frozenset[str] = frozenset({
+        # Buffered I/O (FILE* state can be mid-mutation when the signal lands).
+        "printf", "fprintf", "vprintf", "vfprintf",
+        "puts", "fputs", "putchar", "fputc", "putc",
+        "fopen", "fopen64", "freopen", "fclose", "fflush",
+        "fread", "fwrite",
+        "fgets", "fgetc", "getc", "getchar",
+        # Locale-sensitive formatters/scanners — non-reentrant in glibc.
+        "sprintf", "snprintf", "vsprintf", "vsnprintf",
+        "scanf", "sscanf", "fscanf", "vscanf", "vsscanf", "vfscanf",
+        "__isoc99_scanf", "__isoc99_sscanf", "__isoc99_fscanf",
+        # Dynamic allocator family — global state, reentrancy unsafe.
+        "malloc", "calloc", "realloc", "reallocarray", "free",
+        "strdup", "strndup",
+        # Time/locale conversions — share static buffers.
+        "localtime", "gmtime", "ctime", "asctime",
+        # Logging / termination paths that flush stdio or run atexit hooks.
+        "syslog", "exit",
+    })
+
+    def signal_handler_unsafe_calls(self) -> list[dict[str, Any]]:
+        """Find async-signal-unsafe calls inside installed signal handlers.
+
+        Detects the CWE-362 race-condition pattern where a signal handler —
+        installed via ``signal(sig, handler)`` or one of its BSD/SysV aliases
+        (``__sysv_signal``/``bsd_signal``/``sysv_signal``/``sigset``) — calls a
+        libc function that is NOT on the POSIX.1-2017 §2.4.3 async-signal-safe
+        list. A signal can land at any instruction boundary on the same thread,
+        including mid-``printf`` or mid-``malloc``; if the handler then calls
+        the same family, the global state (the ``FILE*`` lock, the heap arena,
+        the locale buffer) races with itself and the resulting corruption /
+        deadlock is the weakness.
+
+        Detection steps (purely call-site-driven plus a single-arg pointer
+        resolution):
+
+          1. Enumerate every call to a signal-installer (``signal`` & aliases).
+          2. For each such call, walk back through the instruction stream to
+             resolve the handler-pointer argument register
+             (SysV ``rsi`` on x86_64, AAPCS64 ``x1`` on AArch64). On x86_64 the
+             pointer is materialized with ``lea rsi, [rip + disp]`` (PIE/no-PIE
+             rodata-style RIP-relative) or an immediate ``mov rsi, imm``; on
+             AArch64 with ``adrp x1, sym ; add x1, x1, :lo12:sym``. Either
+             form yields an absolute address.
+          3. Resolve that address to a function via ``cfg.kb.functions``.
+             Skip the site if the address does not land in a known function —
+             handlers passed by indirection (loaded from a struct field,
+             returned by another call) are intentionally unresolvable here and
+             stay silent to preserve the zero-false-positive posture.
+          4. Walk the handler function's instructions and flag every direct
+             call to a function in :attr:`_ASYNC_SIGNAL_UNSAFE`.
+
+        Each returned dict describes one unsafe call inside a handler:
+
+            {
+                "handler":         handler function name,
+                "handler_address": address of the handler's entry,
+                "installer":       the signal-installer symbol used
+                                   (e.g. "signal"),
+                "install_address": address of the signal() call site,
+                "unsafe_name":     the async-signal-unsafe function called,
+                "unsafe_address":  address of the unsafe call inside the handler,
+            }
+
+        Architecture-aware (x86_64 + AArch64). Returns an empty list on any
+        other architecture.
+        """
+        arch_name = self.project.arch.name
+        if arch_name not in ("AMD64", "AARCH64"):
+            return []
+
+        cfg = self.cfg()
+        call_mnemonics = self._call_mnemonics()
+
+        # Step 1: find every signal-installer call site.
+        installer_sites: list[tuple[str, int, Any]] = []  # (installer_name, call_addr, func)
+        for func in cfg.kb.functions.values():
+            if getattr(func, "is_plt", False) or getattr(func, "is_simprocedure", False):
+                continue
+            insns = self._func_insns_sorted(func)
+            for idx, insn in enumerate(insns):
+                if insn.mnemonic not in call_mnemonics:
+                    continue
+                target = self._resolve_call_target(insn, cfg)
+                if target in self._SIGNAL_INSTALLERS:
+                    installer_sites.append((target, idx, func))
+
+        if not installer_sites:
+            return []
+
+        # Step 2+3: resolve each install site's handler pointer to a function.
+        # We keep a dedup map so two installs of the same handler only scan it
+        # once for unsafe calls (but each install site is reported separately
+        # to keep findings actionable).
+        resolved: list[dict[str, Any]] = []  # one entry per install site
+        for installer, call_idx, caller_func in installer_sites:
+            caller_insns = self._func_insns_sorted(caller_func)
+            call_insn = caller_insns[call_idx]
+            handler_addr = self._resolve_signal_handler_arg(
+                caller_insns, call_idx, arch_name
+            )
+            if handler_addr is None:
+                continue
+            handler_func = cfg.kb.functions.get(handler_addr)
+            if handler_func is None or getattr(handler_func, "is_plt", False):
+                continue
+            if getattr(handler_func, "is_simprocedure", False):
+                continue
+            resolved.append({
+                "installer": installer,
+                "install_address": call_insn.address,
+                "handler_func": handler_func,
+                "handler_address": handler_func.addr,
+            })
+
+        if not resolved:
+            return []
+
+        # Step 4: for each (deduped) handler, list unsafe call sites; then emit
+        # one finding entry per (install_site x unsafe_call_in_handler) pair.
+        handler_unsafe_cache: dict[int, list[tuple[int, str]]] = {}
+        results: list[dict[str, Any]] = []
+        for site in resolved:
+            handler_func = site["handler_func"]
+            haddr = site["handler_address"]
+            if haddr not in handler_unsafe_cache:
+                unsafe_calls: list[tuple[int, str]] = []
+                hinsns = self._func_insns_sorted(handler_func)
+                for hinsn in hinsns:
+                    if hinsn.mnemonic not in call_mnemonics:
+                        continue
+                    htarget = self._resolve_call_target(hinsn, cfg)
+                    if htarget in self._ASYNC_SIGNAL_UNSAFE:
+                        unsafe_calls.append((hinsn.address, htarget))
+                handler_unsafe_cache[haddr] = unsafe_calls
+            for unsafe_addr, unsafe_name in handler_unsafe_cache[haddr]:
+                results.append({
+                    "handler": handler_func.name,
+                    "handler_address": haddr,
+                    "installer": site["installer"],
+                    "install_address": site["install_address"],
+                    "unsafe_name": unsafe_name,
+                    "unsafe_address": unsafe_addr,
+                })
+        return results
+
+    def _resolve_signal_handler_arg(
+        self, insns: list[Any], call_idx: int, arch_name: str
+    ) -> int | None:
+        """Resolve the signal-handler pointer arg for a ``signal()`` call.
+
+        Walks back from ``insns[call_idx]`` (a ``call``/``bl`` to a signal
+        installer) to determine the absolute address loaded into the
+        second-argument register (SysV ``rsi`` on x86_64, AAPCS64 ``x1`` on
+        AArch64). Returns the resolved address or ``None`` if the handler was
+        materialized in a form this scanner does not recognize (e.g. loaded
+        from a stack slot, returned by an earlier call). The conservative
+        ``None`` outcome preserves the zero-false-positive posture.
+
+        Recognized forms:
+          * x86_64: ``lea rsi, [rip + disp]`` (RIP-relative rodata-style
+            pointer; the canonical -O0 emission for a function-address literal)
+            or ``mov rsi, imm`` (no-PIE absolute address).
+          * AArch64: ``adrp x1, sym`` paired with ``add x1, x1, :lo12:sym``
+            (page+offset address materialization, the canonical AAPCS64 form).
+        """
+        import re
+
+        call_insn = insns[call_idx]
+        # Scan a small window back from the call. -O0 sets the argument
+        # registers immediately before the call.
+        window_start = max(0, call_idx - 16)
+        window = insns[window_start: call_idx]
+
+        if arch_name == "AMD64":
+            # SysV: second integer arg in rsi. -O0 codegen for `signal(sig,
+            # handler)` typically emits `lea rax, [rip + disp]` then
+            # `mov rsi, rax` (the function-pointer literal is materialized in
+            # rax first, then copied into the arg register). Track an alias
+            # set so we follow that hop.
+            aliases: set[str] = {"rsi"}
+            lea_rip = re.compile(
+                r"^(r[a-z0-9]+),\s*(?:qword ptr )?\[rip\s*([+\-])\s*(0x[0-9a-f]+|\d+)\]$"
+            )
+            mov_imm = re.compile(r"^(r[a-z0-9]+),\s*(0x[0-9a-f]+|\d+)$")
+            reg_copy = re.compile(r"^(r[a-z0-9]+),\s*(r[a-z0-9]+)$")
+            for prev in reversed(window):
+                op = prev.op_str
+                mn = prev.mnemonic
+                if mn == "lea":
+                    m = lea_rip.match(op)
+                    if m and m.group(1) in aliases:
+                        sign = 1 if m.group(2) == "+" else -1
+                        disp = int(m.group(3), 0)
+                        # RIP at execution time = address of the *next*
+                        # instruction (current insn end).
+                        rip_at_exec = prev.address + prev.size
+                        return rip_at_exec + sign * disp
+                    # `lea` writes to a register we track but in an
+                    # unrecognized form -> bail conservatively.
+                    if m is None:
+                        first = op.split(",", 1)[0].strip()
+                        if first in aliases:
+                            return None
+                if mn == "mov":
+                    m = mov_imm.match(op)
+                    if m and m.group(1) in aliases:
+                        return int(m.group(2), 0)
+                    mc = reg_copy.match(op)
+                    if mc and mc.group(1) in aliases:
+                        # `mov rsi, rax` style — the source register now
+                        # carries the handler pointer too. Add it to the
+                        # alias set and keep scanning back.
+                        aliases.add(mc.group(2))
+                        continue
+                    # Any other write to a tracked register (e.g.
+                    # `mov rsi, [rbp-N]`) means the handler is not a simple
+                    # address literal — give up conservatively.
+                    first = op.split(",", 1)[0].strip()
+                    if first in aliases:
+                        return None
+            return None
+
+        # AArch64. AAPCS64: second integer arg in x1.
+        # Pattern (canonical -O0): `adrp xR, page ; add xR, xR, #:lo12:sym ;
+        # mov x1, xR`. We track per-register "resolved address so far" and
+        # propagate it through register copies. Capstone renders adrp's
+        # operand as the already-resolved page address.
+        adrp_re = re.compile(r"^(x[0-9]+|x29|x30|xzr),\s*(?:#)?(0x[0-9a-f]+|\d+)$")
+        add_imm_re = re.compile(
+            r"^(x[0-9]+|x29|x30),\s*(x[0-9]+|x29|x30),\s*(?:#)?(0x[0-9a-f]+|\d+)$"
+        )
+        mov_reg_re = re.compile(r"^(x[0-9]+|x29|x30),\s*(x[0-9]+|x29|x30|xzr)$")
+        # Per-register: the resolved absolute address currently held.
+        reg_addr: dict[str, int] = {}
+        for prev in window:
+            mn = prev.mnemonic
+            op = prev.op_str.strip()
+            if mn == "adrp":
+                m = adrp_re.match(op)
+                if m:
+                    reg_addr[m.group(1)] = int(m.group(2), 0)
+                    continue
+                # Any adrp we can't parse: drop nothing (it writes some reg).
+                continue
+            if mn == "add":
+                m = add_imm_re.match(op)
+                if m and m.group(2) in reg_addr:
+                    reg_addr[m.group(1)] = reg_addr[m.group(2)] + int(m.group(3), 0)
+                    continue
+                # `add` of an unrecognized form: invalidate the dest reg if
+                # we can identify it.
+                first = op.split(",", 1)[0].strip()
+                reg_addr.pop(first, None)
+                continue
+            if mn in ("mov", "orr"):
+                m = mov_reg_re.match(op)
+                if m and m.group(2) in reg_addr:
+                    reg_addr[m.group(1)] = reg_addr[m.group(2)]
+                    continue
+                first = op.split(",", 1)[0].strip()
+                reg_addr.pop(first, None)
+                continue
+            if mn in ("ldr", "ldur", "ldp"):
+                # A load reassigns the dest reg from memory: invalidate.
+                first = op.split(",", 1)[0].strip()
+                reg_addr.pop(first, None)
+                continue
+        return reg_addr.get("x1")
 
     def _resolve_call_target(self, insn: Any, cfg: Any) -> str | None:
         """Resolve a call instruction's target to a symbol name if possible.

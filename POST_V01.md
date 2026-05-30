@@ -244,6 +244,46 @@ directly). Scope carefully to avoid overrun.
 
 ---
 
+### Additional shipped detector — Async-signal-unsafe call in signal handler (CWE-362) ✅ IMPLEMENTED (Rotation 33)
+
+**Status:** Shipped. A new CWE-362 (Concurrent Execution using Shared Resource
+with Improper Synchronization) check detects the signal-handler race-condition
+pattern: a function installed as a signal handler via `signal(sig, handler)`
+or one of its BSD/SysV aliases (`__sysv_signal`/`bsd_signal`/`sysv_signal`/
+`sigset`) calls a libc function that is NOT on the POSIX.1-2017 §2.4.3
+async-signal-safe list. A signal can land at any instruction boundary on the
+same thread; if the handler invokes the same family as the interrupted flow
+(`printf` mid-`printf`, `malloc` mid-`malloc`), the shared global state
+(`FILE` lock, heap arena, locale buffer) races with itself. The engine helper
+`signal_handler_unsafe_calls()` does the work: (1) enumerate every signal-
+installer call site; (2) walk back from the call to resolve the handler-
+pointer argument register (SysV `rsi` on x86_64; AAPCS64 `x1` on AArch64),
+recognizing the x86_64 `lea rsi, [rip + disp]` / `lea rax, [rip + disp] ;
+mov rsi, rax` RIP-relative form and the AArch64 `adrp x1, page ; add x1, x1,
+#:lo12:sym` page+offset form; (3) resolve the address to a function via
+`cfg.kb.functions`; (4) scan that function for direct calls to libc symbols
+on the async-signal-UNSAFE set (buffered stdio, locale-sensitive formatters/
+scanners, dynamic-allocator family, `syslog`, `exit` — explicitly NOT the
+POSIX-safe primitives `write`/`read`/`_exit`/`_Exit`/`signal`/`raise`/`kill`/
+`sigaction`/`sigprocmask`). Findings carry `confidence: "high"`: both halves
+are exactly resolved (handler-pointer → known function; unsafe call → direct
+named libc call). The only soundness gap is unresolvable indirect-installed
+handlers (e.g. `sigaction(sig, &act, NULL)` where `act.sa_handler` is a
+struct field), which stay silent rather than false-positive — the
+conservative failure mode. A fixture `tests/fixtures/cwe362-vuln.c` installs
+`unsafe_handler` (printf/malloc/free → all three fire) and `safe_handler`
+(write/_exit only → must NOT fire) via `signal()`, and defines an
+uninstalled helper `unused_unsafe_helper` (also must NOT fire — CWE-676's
+job, not CWE-362's). **Arch-agnostic: runs on both x86_64 and AArch64** —
+the call-site discovery is arch-agnostic and the single handler-pointer-arg
+resolution is per-architecture. CWE-362 is distinct from the already-shipped
+CWE-367 (TOCTOU file-system race): CWE-367 needs both check and use co-
+located in the same function on a path name, while CWE-362 fires on any
+unsafe libc call inside an installed handler — different program-shape, same
+weakness family (race condition).
+
+---
+
 ### Additional shipped detector — Memory leak (CWE-401) ✅ IMPLEMENTED (Rotation 32)
 
 **Status:** Shipped. A new CWE-401 (Missing Release of Memory after Effective

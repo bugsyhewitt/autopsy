@@ -16,7 +16,7 @@ within a function and across a single call hop. It is slower and deeper by
 design.
 
 > **Scope:** ELF only. Full check coverage on x86_64; every check (the
-> call-site-driven CWE-78/338/367/377/676 plus the arch-aware register-level
+> call-site-driven CWE-78/338/362/367/377/676 plus the arch-aware register-level
 > CWE-732, CWE-190, CWE-134, CWE-401, CWE-415, CWE-416, CWE-369, CWE-119,
 > CWE-787, CWE-125, CWE-476) also runs on AArch64. See
 > [Architecture support](#architecture-support) and
@@ -47,7 +47,7 @@ autopsy --version
 ## Usage
 
 ```
-autopsy --binary PATH [--checks {119,125,190,338,367,369,377,401,415,416,78,134,676,732,787,all}] [--max-states N]
+autopsy --binary PATH [--checks {119,125,190,338,362,367,369,377,401,415,416,78,134,676,732,787,all}] [--max-states N]
         [--format json|sarif] [--fail-on LEVEL] [--baseline PATH] [--write-baseline PATH]
 autopsy --list-checks [--format json]
 ```
@@ -172,8 +172,8 @@ never written from, nor applied to, a half-finished run.
 
 | Architecture | Checks that run |
 |---|---|
-| **x86_64 (AMD64)** | all checks (CWE-119, 125, 190, 338, 367, 369, 377, 401, 415, 416, 476, 78, 134, 676, 732, 787) |
-| **AArch64 (ARM64)** | all checks — the call-site-driven checks (**CWE-78**, **CWE-125**, **CWE-338**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**, **CWE-134**, **CWE-401**, **CWE-415**, **CWE-416**, **CWE-369**, **CWE-119**, **CWE-787**, **CWE-476**) |
+| **x86_64 (AMD64)** | all checks (CWE-119, 125, 190, 338, 362, 367, 369, 377, 401, 415, 416, 476, 78, 134, 676, 732, 787) |
+| **AArch64 (ARM64)** | all checks — the call-site-driven checks (**CWE-78**, **CWE-125**, **CWE-338**, **CWE-362**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**, **CWE-134**, **CWE-401**, **CWE-415**, **CWE-416**, **CWE-369**, **CWE-119**, **CWE-787**, **CWE-476**) |
 
 On an AArch64 target, the **CWE-732** permission check runs natively: its register
 reasoning only reads a single mode/mask *immediate* out of the AAPCS64 argument
@@ -247,9 +247,9 @@ check is arch-aware and nothing is skipped on AArch64. The report's
 
 ```json
 {
-  "checks": [119, 125, 190, 338, 367, 369, 377, 401, 415, 416, 476, 78, 134, 676, 732, 787],
+  "checks": [119, 125, 190, 338, 362, 367, 369, 377, 401, 415, 416, 476, 78, 134, 676, 732, 787],
   "skipped_checks": [],
-  "findings": [ /* CWE-78 / 119 / 134 / 190 / 338 / 367 / 369 / 377 / 415 / 416 / 476 / 676 / 732 / 787 findings */ ]
+  "findings": [ /* CWE-78 / 119 / 134 / 190 / 338 / 362 / 367 / 369 / 377 / 415 / 416 / 476 / 676 / 732 / 787 findings */ ]
 }
 ```
 
@@ -1008,6 +1008,81 @@ autopsy --binary tests/fixtures/cwe476-vuln --checks 476 --format json
   "confidence": "medium"
 }
 ```
+
+### CWE-362 — async-signal-unsafe call inside a signal handler (race condition)
+
+A function installed as a signal handler — via `signal(sig, handler)` or one
+of its BSD/SysV aliases (`__sysv_signal`/`bsd_signal`/`sysv_signal`/`sigset`)
+— calls a libc function that is **not** on the POSIX.1-2017 §2.4.3
+async-signal-safe list. A signal can land at any instruction boundary on the
+same thread, including in the middle of a libc call already in progress. If
+the handler then invokes the *same* family — `printf` while the main flow was
+inside `printf` (FILE-lock recursion / stdio-buffer corruption), `malloc`
+while the main flow was inside `malloc` (heap-arena reentrancy / deadlock) —
+the shared global state races with itself. This is the canonical
+"improper-synchronization-of-a-shared-resource" race weakness MITRE classes
+under CWE-362, distinct from the CWE-367 TOCTOU file-system race.
+
+The detector is **mostly call-site-driven**, plus one narrow form of pointer
+resolution: it walks back from each `signal(sig, handler)` call to read the
+*absolute address* loaded into the second argument register (SysV `rsi` on
+x86_64, AAPCS64 `x1` on AArch64) and resolves that address to a function via
+the CFG. The engine recognizes the x86_64 `lea rsi, [rip + disp]` /
+`lea rax, [rip + disp] ; mov rsi, rax` RIP-relative form (the canonical -O0
+emission for a function-address literal) and the AArch64 `adrp x1, page ;
+add x1, x1, #:lo12:sym` page+offset form. Handlers passed by *indirection* —
+loaded from a struct field, returned by an earlier call — are intentionally
+unresolvable and stay silent, preserving the zero-false-positive posture. For
+each resolved handler, every direct call to a function on the async-signal-
+unsafe list is reported as a separate finding anchored at the unsafe call.
+
+The async-signal-unsafe set targets the high-signal categories enumerated by
+POSIX: buffered stdio (`printf`/`fprintf`/`puts`/`fputs`/`fopen`/`fclose`/
+`fread`/`fwrite`/`fflush`/`fgets`), locale-sensitive formatters/scanners
+(`sprintf`/`snprintf`/`sscanf`/`scanf`/`__isoc99_*`/`localtime`/`ctime`/
+`asctime`/`gmtime` non-reentrant variants), the dynamic-allocator family
+(`malloc`/`calloc`/`realloc`/`reallocarray`/`free`/`strdup`/`strndup`),
+`syslog`, and `exit` (which runs `atexit` hooks and flushes stdio — the safe
+forms are `_Exit`/`_exit`). The bounded scanf/printf siblings and the
+descriptor-level I/O (`write`/`read`) are intentionally absent — they are on
+the POSIX safe list and must never fire.
+
+Like CWE-676/367/377, CWE-362 needs no attacker-input source: every signal
+delivery is the asynchronous "input" that materializes the race. Findings
+carry `confidence: "high"`: the handler-pointer→function resolution is exact
+(an absolute literal address landing in a known function), and the
+unsafe-call enumeration is exact (direct call to a named libc symbol on the
+POSIX-unsafe list). The only soundness gap is unresolvable indirect-installed
+handlers (e.g. via `sigaction(sig, &act, NULL)`, where `act.sa_handler` is a
+struct field), which stay silent rather than false-positive.
+
+The detector is **call-site-driven plus single-immediate-arg resolution** —
+both halves are arch-aware on **x86_64 and AArch64**.
+
+```bash
+autopsy --binary tests/fixtures/cwe362-vuln --checks 362 --format json
+```
+
+```json
+{
+  "cwe": 362,
+  "function": "unsafe_handler",
+  "address": "0x4011a5",
+  "taint_trace": [
+    {"address": "0x401264", "description": "signal-installation: signal() registers unsafe_handler() as the handler — the handler can run asynchronously on the same thread"},
+    {"address": "0x4011a5", "description": "async-signal-unsafe use: unsafe_handler() calls printf(), which shares global state (FILE locks / heap arena / locale buffers) with the interrupted flow"}
+  ],
+  "evidence": "signal() installs unsafe_handler() as a signal handler, and unsafe_handler() calls async-signal-unsafe printf(); a signal delivered while the program is mid-printf() will reenter printf() inside the handler, racing the shared global state (POSIX.1-2017 §2.4.3 lists printf() as not async-signal-safe) — use only async-signal-safe primitives in the handler (e.g. write() instead of printf(), _Exit() instead of exit()), or set a sig_atomic_t flag and handle the work outside the handler",
+  "confidence": "high"
+}
+```
+
+> `sigaction()` is deliberately NOT handled in this release — its handler
+> lives inside a `struct sigaction` referenced by pointer, which would require
+> struct-field reasoning beyond the single-immediate-arg resolution this
+> check stays in scope for. An installed-handler set imported via `sigaction`
+> would currently miss findings rather than emit false positives, which is
+> the conservative-safe failure mode.
 
 ### CWE-367 — time-of-check time-of-use (TOCTOU) race condition
 

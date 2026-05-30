@@ -803,6 +803,64 @@ def test_aarch64_runs_all_register_level_checks(require_angr, fixtures_dir):
     assert any(f["cwe"] == 78 for f in d["findings"])
 
 
+def test_cwe362_detected(require_angr, fixtures_dir):
+    # Async-signal-unsafe libc calls inside an installed signal handler.
+    # The fixture installs two handlers via signal():
+    #   - unsafe_handler  : calls printf/malloc/free  -> must each fire
+    #   - safe_handler    : calls write/_exit only    -> must NOT fire
+    # It also defines unused_unsafe_helper() which calls printf/malloc but
+    # is never installed as a handler -> must NOT fire under CWE-362.
+    rep = _analyze(fixtures_dir, "cwe362-vuln", "362")
+    d = rep.to_dict()
+    assert d["error"] is None
+    cwe362 = [f for f in d["findings"] if f["cwe"] == 362]
+    assert cwe362, f"expected CWE-362 findings, got {d['findings']}"
+    for f in cwe362:
+        _assert_finding_contract(f, 362)
+
+    funcs = {f["function"] for f in cwe362}
+    # Every CWE-362 finding must be anchored INSIDE unsafe_handler — the only
+    # installed handler that calls async-signal-unsafe functions.
+    assert funcs == {"unsafe_handler"}, (
+        f"expected only unsafe_handler findings, got {funcs}"
+    )
+
+    # The three unsafe families (stdio, allocator, allocator-release) must all
+    # be flagged — evidence text is the easiest stable signal here.
+    evidence_blob = " ".join(f["evidence"] for f in cwe362)
+    assert "printf" in evidence_blob, f"printf not flagged: {cwe362}"
+    assert "malloc" in evidence_blob, f"malloc not flagged: {cwe362}"
+    assert "free" in evidence_blob, f"free not flagged: {cwe362}"
+
+    # Every finding carries the install-site -> use-site taint trace (2 steps).
+    for f in cwe362:
+        assert len(f["taint_trace"]) == 2, f
+        # And reports high confidence (both halves are exactly resolved).
+        assert f["confidence"] == "high"
+
+
+def test_cwe362_safe_handler_silent_under_all(require_angr, fixtures_dir):
+    # Under "all" the safe_handler (write/_exit only) and the uninstalled
+    # helper (printf/malloc never registered as a handler) must NOT produce
+    # any CWE-362 findings — zero false positives on the safe-by-construction
+    # patterns. (CWE-676 may still flag the uninstalled helper's dangerous
+    # calls; that is a separate weakness class.)
+    rep = _analyze(fixtures_dir, "cwe362-vuln", "all")
+    d = rep.to_dict()
+    assert d["error"] is None
+    cwe362 = [f for f in d["findings"] if f["cwe"] == 362]
+    funcs = {f["function"] for f in cwe362}
+    assert "safe_handler" not in funcs, (
+        f"safe_handler uses only async-signal-safe primitives and must not fire: {cwe362}"
+    )
+    assert "unused_unsafe_helper" not in funcs, (
+        f"a function never installed as a handler must not fire under CWE-362: {cwe362}"
+    )
+    assert "main" not in funcs, (
+        f"the installer call site must not itself produce a CWE-362 finding: {cwe362}"
+    )
+
+
 def test_clean_baseline_zero_false_positives(require_angr, fixtures_dir):
     rep = _analyze(fixtures_dir, "clean-baseline", "all")
     d = rep.to_dict()
@@ -830,6 +888,7 @@ def test_max_states_high_completes_all_fixtures(require_angr, fixtures_dir):
         ("cwe119-vuln", 119),
         ("cwe190-vuln", 190),
         ("cwe338-vuln", 338),
+        ("cwe362-vuln", 362),
         ("cwe367-vuln", 367),
         ("cwe369-vuln", 369),
         ("cwe377-vuln", 377),
