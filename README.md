@@ -17,9 +17,10 @@ design.
 
 > **Scope:** ELF only. Full check coverage on x86_64; every check (the
 > call-site-driven CWE-78/338/367/377/676 plus the arch-aware register-level
-> CWE-732, CWE-190, CWE-134, CWE-415, CWE-416, CWE-369, CWE-119, CWE-787,
-> CWE-125, CWE-476) also runs on AArch64. See [Architecture support](#architecture-support)
-> and [What autopsy is not](#what-autopsy-is-not).
+> CWE-732, CWE-190, CWE-134, CWE-401, CWE-415, CWE-416, CWE-369, CWE-119,
+> CWE-787, CWE-125, CWE-476) also runs on AArch64. See
+> [Architecture support](#architecture-support) and
+> [What autopsy is not](#what-autopsy-is-not).
 
 ---
 
@@ -46,7 +47,7 @@ autopsy --version
 ## Usage
 
 ```
-autopsy --binary PATH [--checks {119,125,190,338,367,369,377,415,416,78,134,676,732,787,all}] [--max-states N]
+autopsy --binary PATH [--checks {119,125,190,338,367,369,377,401,415,416,78,134,676,732,787,all}] [--max-states N]
         [--format json|sarif] [--fail-on LEVEL] [--baseline PATH] [--write-baseline PATH]
 autopsy --list-checks [--format json]
 ```
@@ -171,8 +172,8 @@ never written from, nor applied to, a half-finished run.
 
 | Architecture | Checks that run |
 |---|---|
-| **x86_64 (AMD64)** | all checks (CWE-119, 125, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787) |
-| **AArch64 (ARM64)** | all checks — the call-site-driven checks (**CWE-78**, **CWE-125**, **CWE-338**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**, **CWE-134**, **CWE-415**, **CWE-416**, **CWE-369**, **CWE-119**, **CWE-787**, **CWE-476**) |
+| **x86_64 (AMD64)** | all checks (CWE-119, 125, 190, 338, 367, 369, 377, 401, 415, 416, 476, 78, 134, 676, 732, 787) |
+| **AArch64 (ARM64)** | all checks — the call-site-driven checks (**CWE-78**, **CWE-125**, **CWE-338**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**, **CWE-134**, **CWE-401**, **CWE-415**, **CWE-416**, **CWE-369**, **CWE-119**, **CWE-787**, **CWE-476**) |
 
 On an AArch64 target, the **CWE-732** permission check runs natively: its register
 reasoning only reads a single mode/mask *immediate* out of the AAPCS64 argument
@@ -246,7 +247,7 @@ check is arch-aware and nothing is skipped on AArch64. The report's
 
 ```json
 {
-  "checks": [119, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787],
+  "checks": [119, 125, 190, 338, 367, 369, 377, 401, 415, 416, 476, 78, 134, 676, 732, 787],
   "skipped_checks": [],
   "findings": [ /* CWE-78 / 119 / 134 / 190 / 338 / 367 / 369 / 377 / 415 / 416 / 476 / 676 / 732 / 787 findings */ ]
 }
@@ -373,6 +374,66 @@ so — like CWE-732 — it runs on **both x86_64 and AArch64** (the
 `tests/fixtures/cwe190-aarch64-vuln` ARM64 fixture exercises it). An op that
 combines two distinct register sources (both potentially tainted) is reported
 `high`; a register-plus-immediate op (one symbolic operand) is `medium`.
+
+### CWE-401 — memory leak (missing release of an owned allocation)
+
+A function calls an *owned* allocator (`malloc`/`calloc`/`realloc`/
+`reallocarray`/`strdup`/`strndup`) and then returns without releasing or
+transferring the allocation. The detector flags a leak only when **all four**
+ownership-transfer paths are absent before the function returns:
+
+- no `free()`/`realloc()`/`reallocarray()` call whose first argument aliases
+  the slot (the slot is never released here),
+- no reload of the slot into the architecture's return register (`rax` on
+  x86_64, `x0` on AArch64) before a `ret` (the pointer is not returned),
+- no reload of the slot into any integer argument register before any other
+  call (the pointer is not handed to a callee that might take ownership), and
+- no store of an aliasing register to a memory location other than the
+  original spill slot (the pointer is not stashed in a struct field, a global,
+  or another stack frame).
+
+If any of those four escapes appears the function is treated as transferring
+ownership and the site stays silent. The canonical
+`p = malloc(64); use(p); free(p);` is silent (a release call clears the
+finding), and the canonical `char *make(void){ return malloc(64); }` is
+silent (a return-register escape clears the finding) — only an allocation
+with *none* of the four escapes is reported.
+
+`getenv` and `secure_getenv` are deliberately **excluded** from the owned
+allocator set: their return values point at process-environment storage
+owned by libc and must not be freed by the caller, so an unfreed `getenv()`
+result is not a leak. (CWE-476 still tracks `getenv()` results for unchecked
+dereferences — a different weakness.)
+
+```bash
+autopsy --binary tests/fixtures/cwe401-vuln --checks 401 --format json
+```
+
+```json
+{
+  "cwe": 401,
+  "function": "leaky",
+  "address": "0x401143",
+  "taint_trace": [
+    {"address": "0x401143", "description": "heap allocation via malloc() — caller owns the returned pointer"},
+    {"address": "0x401143", "description": "the allocator result is spilled to stack slot rbp-8 and never released or transferred before the function returns"}
+  ],
+  "evidence": "malloc() in leaky returns an owned heap pointer that is never freed and never escapes the function (no free()/realloc(), no return, no argument-pass, no memory store) — the allocation leaks when the function exits",
+  "confidence": "medium"
+}
+```
+
+> This is an **arch-aware register-level** detector. The slot-tracking
+> abstraction is identical across architectures — only the concrete register
+> names (`rax`/`rdi`-`r9` on x86_64 SysV; `x0`/`x0`-`x7` on AAPCS64), the
+> spill/reload mnemonics, and the stack-slot operand syntax differ. So — like
+> CWE-415/416/476 — it runs on **both x86_64 and AArch64**. Findings carry
+> `confidence: "medium"`: an owned allocator with no observed release or
+> escape is a strong structural leak signal, but the intra-procedural slot
+> tracking is not a full ownership proof (an alias path the scanner does not
+> recognize could legitimately transfer ownership without being visible). The
+> detector is deliberately intra-procedural — every escape suppresses the
+> finding, which is the right trade for autopsy's "tight signal" posture.
 
 ### CWE-415 — double-free (intra-procedural and single-hop interprocedural)
 
