@@ -163,6 +163,32 @@ def test_cwe787_detected(require_angr, fixtures_dir):
     assert cwe787[0]["confidence"] == "medium"
 
 
+def test_cwe125_detected(require_angr, fixtures_dir):
+    # Out-of-bounds heap read: compare_from_heap() allocates malloc(size) and
+    # then calls memcmp(buf, needle, length) where size and length are
+    # independent attacker-controlled values -> the read length may exceed the
+    # allocation size and walk off the end of the heap buffer (CWE-125).
+    # The safe_compare() companion uses memcmp(buf, magic, 4) with a literal
+    # length and must NOT fire (literal-length suppression).
+    rep = _analyze(fixtures_dir, "cwe125-vuln", "125")
+    d = rep.to_dict()
+    assert d["error"] is None
+    cwe125 = [f for f in d["findings"] if f["cwe"] == 125]
+    assert cwe125, f"expected a CWE-125 finding, got {d['findings']}"
+    _assert_finding_contract(cwe125[0], 125)
+    # malloc+memcmp taint mismatch heuristic reports medium confidence.
+    assert cwe125[0]["confidence"] == "medium"
+    # The flagged function must be the vulnerable one, not the literal-length
+    # safe companion.
+    funcs = {f["function"] for f in cwe125}
+    assert "compare_from_heap" in funcs, (
+        f"expected compare_from_heap in findings, got {funcs}"
+    )
+    assert "safe_compare" not in funcs, (
+        f"safe_compare uses a literal length and must be suppressed, got {funcs}"
+    )
+
+
 def test_cwe134_detected(require_angr, fixtures_dir):
     # Uncontrolled format string: emit() passes attacker-controlled input
     # straight to printf() as the format string (printf(user_input)).

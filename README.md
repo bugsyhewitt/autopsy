@@ -18,7 +18,7 @@ design.
 > **Scope:** ELF only. Full check coverage on x86_64; every check (the
 > call-site-driven CWE-78/338/367/377/676 plus the arch-aware register-level
 > CWE-732, CWE-190, CWE-134, CWE-415, CWE-416, CWE-369, CWE-119, CWE-787,
-> CWE-476) also runs on AArch64. See [Architecture support](#architecture-support)
+> CWE-125, CWE-476) also runs on AArch64. See [Architecture support](#architecture-support)
 > and [What autopsy is not](#what-autopsy-is-not).
 
 ---
@@ -46,7 +46,7 @@ autopsy --version
 ## Usage
 
 ```
-autopsy --binary PATH [--checks {119,190,338,367,369,377,415,416,78,134,676,732,787,all}] [--max-states N]
+autopsy --binary PATH [--checks {119,125,190,338,367,369,377,415,416,78,134,676,732,787,all}] [--max-states N]
         [--format json|sarif] [--fail-on LEVEL] [--baseline PATH] [--write-baseline PATH]
 autopsy --list-checks [--format json]
 ```
@@ -171,8 +171,8 @@ never written from, nor applied to, a half-finished run.
 
 | Architecture | Checks that run |
 |---|---|
-| **x86_64 (AMD64)** | all checks (CWE-119, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787) |
-| **AArch64 (ARM64)** | all checks — the call-site-driven checks (**CWE-78**, **CWE-338**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**, **CWE-134**, **CWE-415**, **CWE-416**, **CWE-369**, **CWE-119**, **CWE-787**, **CWE-476**) |
+| **x86_64 (AMD64)** | all checks (CWE-119, 125, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787) |
+| **AArch64 (ARM64)** | all checks — the call-site-driven checks (**CWE-78**, **CWE-125**, **CWE-338**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**, **CWE-134**, **CWE-415**, **CWE-416**, **CWE-369**, **CWE-119**, **CWE-787**, **CWE-476**) |
 
 On an AArch64 target, the **CWE-732** permission check runs natively: its register
 reasoning only reads a single mode/mask *immediate* out of the AAPCS64 argument
@@ -621,6 +621,52 @@ autopsy --binary tests/fixtures/cwe787-vuln --checks 787 --format json
 > The CWE-787 check uses x86_64 SysV register/stack-slot conventions (the copy
 > length argument is in `rdx`) and runs on x86_64 (AMD64) targets only; on
 > AArch64 the register-level checks are skipped.
+
+### CWE-125 — out-of-bounds read (heap buffer over-read)
+
+The read-side complement of CWE-787. A heap buffer is allocated
+(`malloc`/`calloc`/`realloc`) and then read by a bulk-compare/scan sink
+(`memcmp`/`strncmp`/`strncasecmp`/`memchr`) in the same function, where the
+read length is an *independent* value — so the read may walk past the
+allocation. A finding requires the allocator and the read sink to be co-located
+in one function **and** at least one attacker-controlled input source
+(`fgets`/`read`/`scanf`/…) in the program.
+
+**Literal-length reads are excluded** — a `memcmp(buf, magic, 4)` whose length
+is a compile-time immediate cannot be tainted and is not flagged, mirroring the
+CWE-787 suppression. The length argument lives in the same SysV/AAPCS64
+register as the write-side sinks (`rdx`/`x2`), so the suppression engine
+generalizes transparently across `memcmp`/`strncmp`/`strncasecmp`/`memchr`.
+
+Because the analysis confirms the co-located allocator + variable-length read +
+program-wide input source — but does not symbolically prove the read length
+exceeds the allocation size on all paths — these findings carry
+`confidence: "medium"`. CWE-125 sits at rank #6 on the 2025 MITRE/CISA CWE Top
+25 with 12 CISA KEV entries (actively exploited), so this is one of the
+highest-leverage detectors autopsy ships.
+
+```bash
+autopsy --binary tests/fixtures/cwe125-vuln --checks 125 --format json
+```
+
+```json
+{
+  "cwe": 125,
+  "function": "compare_from_heap",
+  "address": "0x4012ec",
+  "taint_trace": [
+    {"address": "0x401200", "description": "attacker-controlled value introduced via fgets()"},
+    {"address": "0x401188", "description": "heap buffer allocated via malloc() — size may be tainted"},
+    {"address": "0x4012ec", "description": "memcmp() reads from heap buffer with independent length — length may exceed allocation size"}
+  ],
+  "evidence": "malloc() allocation and memcmp() read co-located in compare_from_heap: independent tainted size and length arguments risk out-of-bounds heap read",
+  "confidence": "medium"
+}
+```
+
+> CWE-125 is purely call-site-driven (it consults `call_sites_to` to find
+> allocator and read sinks, and the engine's existing arch-aware
+> length-literal helper for suppression). It runs on both x86_64 and AArch64.
 
 ### CWE-676 — use of a potentially dangerous function
 

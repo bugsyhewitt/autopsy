@@ -197,7 +197,7 @@ class AngrEngine:
     #
     # All register-level checks are now arch-aware; no check is skipped on
     # AArch64.
-    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 119, 134, 190, 338, 367, 369, 377, 415, 416, 476, 676, 732, 787)
+    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (78, 119, 125, 134, 190, 338, 367, 369, 377, 415, 416, 476, 676, 732, 787)
 
     def assert_supported(self) -> None:
         """Reject targets on architectures autopsy cannot analyze.
@@ -870,6 +870,14 @@ class AngrEngine:
         "strncpy": "rdx",   # strncpy(dst, src, n)
         "strncat": "rdx",   # strncat(dst, src, n)
         "bcopy": "rdx",     # bcopy(src, dst, n)
+        # Bulk-read sinks (CWE-125): the 3rd argument is also a ``size_t n``,
+        # so it arrives in the same SysV register (``rdx``) as the write-side
+        # sinks above. ``copy_call_length_is_literal`` therefore generalizes
+        # to read sinks transparently.
+        "memcmp": "rdx",        # memcmp(s1, s2, n)
+        "strncmp": "rdx",       # strncmp(s1, s2, n)
+        "strncasecmp": "rdx",   # strncasecmp(s1, s2, n)
+        "memchr": "rdx",        # memchr(s, c, n)
     }
 
     # The same mapping for AArch64. AAPCS64 passes integer arguments in
@@ -885,6 +893,12 @@ class AngrEngine:
         "strncpy": "x2",    # strncpy(dst, src, n)
         "strncat": "x2",    # strncat(dst, src, n)
         "bcopy": "x2",      # bcopy(src, dst, n)
+        # Bulk-read sinks (CWE-125): same byte-count arg position (3rd), so
+        # AAPCS64 places it in ``x2`` just like the write-side sinks.
+        "memcmp": "x2",         # memcmp(s1, s2, n)
+        "strncmp": "x2",        # strncmp(s1, s2, n)
+        "strncasecmp": "x2",    # strncasecmp(s1, s2, n)
+        "memchr": "x2",         # memchr(s, c, n)
     }
 
     def copy_call_length_is_literal(

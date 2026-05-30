@@ -13,10 +13,10 @@ from __future__ import annotations
 from typing import Any
 
 # The whole-program CWE classes autopsy detects.
-SUPPORTED_CWES: tuple[int, ...] = (119, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787)
+SUPPORTED_CWES: tuple[int, ...] = (119, 125, 190, 338, 367, 369, 377, 415, 416, 476, 78, 134, 676, 732, 787)
 
 # Valid tokens accepted by --checks.
-VALID_TOKENS: tuple[str, ...] = ("119", "190", "338", "367", "369", "377", "415", "416", "476", "78", "134", "676", "732", "787", "all")
+VALID_TOKENS: tuple[str, ...] = ("119", "125", "190", "338", "367", "369", "377", "415", "416", "476", "78", "134", "676", "732", "787", "all")
 
 # Canonical, human-readable metadata for every CWE autopsy detects. Keyed by
 # CWE id. ``name`` is the full MITRE title, ``short`` a terse label, ``uri`` the
@@ -32,6 +32,11 @@ CWE_CATALOG: dict[int, dict[str, str]] = {
         "name": "Improper Restriction of Operations within the Bounds of a Memory Buffer",
         "short": "Buffer Overflow",
         "uri": "https://cwe.mitre.org/data/definitions/119.html",
+    },
+    125: {
+        "name": "Out-of-bounds Read",
+        "short": "Out-of-bounds Read",
+        "uri": "https://cwe.mitre.org/data/definitions/125.html",
     },
     190: {
         "name": "Integer Overflow or Wraparound",
@@ -142,7 +147,7 @@ def resolve_checks(token: str) -> list[int]:
     """
     if token == "all":
         return list(SUPPORTED_CWES)
-    if token in {"119", "190", "338", "367", "369", "377", "415", "416", "476", "78", "134", "676", "732", "787"}:
+    if token in {"119", "125", "190", "338", "367", "369", "377", "415", "416", "476", "78", "134", "676", "732", "787"}:
         return [int(token)]
     raise ValueError(
         f"unknown check token {token!r}; expected one of {', '.join(VALID_TOKENS)}"
