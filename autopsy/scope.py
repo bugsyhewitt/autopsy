@@ -13,10 +13,10 @@ from __future__ import annotations
 from typing import Any
 
 # The whole-program CWE classes autopsy detects.
-SUPPORTED_CWES: tuple[int, ...] = (22, 119, 125, 190, 338, 362, 367, 369, 377, 401, 415, 416, 476, 78, 134, 676, 732, 787)
+SUPPORTED_CWES: tuple[int, ...] = (22, 119, 125, 190, 327, 338, 362, 367, 369, 377, 401, 415, 416, 476, 78, 134, 676, 732, 787)
 
 # Valid tokens accepted by --checks.
-VALID_TOKENS: tuple[str, ...] = ("22", "119", "125", "190", "338", "362", "367", "369", "377", "401", "415", "416", "476", "78", "134", "676", "732", "787", "all")
+VALID_TOKENS: tuple[str, ...] = ("22", "119", "125", "190", "327", "338", "362", "367", "369", "377", "401", "415", "416", "476", "78", "134", "676", "732", "787", "all")
 
 # Canonical, human-readable metadata for every CWE autopsy detects. Keyed by
 # CWE id. ``name`` is the full MITRE title, ``short`` a terse label, ``uri`` the
@@ -47,6 +47,11 @@ CWE_CATALOG: dict[int, dict[str, str]] = {
         "name": "Integer Overflow or Wraparound",
         "short": "Integer Overflow",
         "uri": "https://cwe.mitre.org/data/definitions/190.html",
+    },
+    327: {
+        "name": "Use of a Broken or Risky Cryptographic Algorithm",
+        "short": "Broken/Risky Crypto",
+        "uri": "https://cwe.mitre.org/data/definitions/327.html",
     },
     338: {
         "name": "Use of Cryptographically Weak Pseudo-Random Number Generator (PRNG)",
@@ -150,9 +155,9 @@ def resolve_checks(token: str) -> list[int]:
     """Resolve a ``--checks`` token into an ordered list of CWE ids.
 
     Args:
-        token: One of "22", "78", "119", "125", "134", "190", "338", "362",
-            "367", "369", "377", "401", "415", "416", "476", "676", "732",
-            "787", or "all".
+        token: One of "22", "78", "119", "125", "134", "190", "327", "338",
+            "362", "367", "369", "377", "401", "415", "416", "476", "676",
+            "732", "787", or "all".
 
     Returns:
         Ordered list of CWE ids to run. "all" expands to every supported CWE
@@ -163,7 +168,7 @@ def resolve_checks(token: str) -> list[int]:
     """
     if token == "all":
         return list(SUPPORTED_CWES)
-    if token in {"22", "119", "125", "190", "338", "362", "367", "369", "377", "401", "415", "416", "476", "78", "134", "676", "732", "787"}:
+    if token in {"22", "119", "125", "190", "327", "338", "362", "367", "369", "377", "401", "415", "416", "476", "78", "134", "676", "732", "787"}:
         return [int(token)]
     raise ValueError(
         f"unknown check token {token!r}; expected one of {', '.join(VALID_TOKENS)}"

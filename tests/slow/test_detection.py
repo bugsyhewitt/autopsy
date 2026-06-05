@@ -326,6 +326,29 @@ def test_cwe338_detected(require_angr, fixtures_dir):
     assert all(f["confidence"] == "medium" for f in cwe338)
 
 
+def test_cwe327_detected(require_angr, fixtures_dir):
+    # Broken/Risky Crypto: the fixture calls MD5(), SHA1(), EVP_md5(), and
+    # EVP_des_cbc() — all broken.  The modern SHA256/EVP_sha256/EVP_aes_256_gcm
+    # calls in safe_hash()/safe_evp_hash()/safe_evp_cipher() must NOT fire.
+    rep = _analyze(fixtures_dir, "cwe327-vuln", "327")
+    d = rep.to_dict()
+    assert d["error"] is None
+    cwe327 = [f for f in d["findings"] if f["cwe"] == 327]
+    assert cwe327, f"expected CWE-327 findings, got {d['findings']}"
+    for f in cwe327:
+        _assert_finding_contract(f, 327)
+    joined = " ".join(f["evidence"] for f in cwe327)
+    assert "MD5" in joined, f"MD5() not flagged: {cwe327}"
+    assert "SHA1" in joined or "SHA-1" in joined, f"SHA1() not flagged: {cwe327}"
+    # The modern secure replacements must NOT be flagged (zero false positives).
+    safe_funcs = {"safe_hash", "safe_evp_hash", "safe_evp_cipher"}
+    flagged_safe = [f for f in cwe327 if f["function"] in safe_funcs]
+    assert not flagged_safe, f"safe functions must not fire: {flagged_safe}"
+    # Direct MD5/SHA1 calls are high confidence.
+    high_findings = [f for f in cwe327 if f["confidence"] == "high"]
+    assert high_findings, f"expected at least one high-confidence finding: {cwe327}"
+
+
 def test_cwe369_detected(require_angr, fixtures_dir):
     # Divide by zero: risky_ratio() divides by an attacker-controlled divisor
     # with no zero-check; safe_ratio() guards the divisor and must NOT fire.
@@ -905,6 +928,7 @@ def test_max_states_high_completes_all_fixtures(require_angr, fixtures_dir):
     for name, cwe in [
         ("cwe119-vuln", 119),
         ("cwe190-vuln", 190),
+        ("cwe327-vuln", 327),
         ("cwe338-vuln", 338),
         ("cwe362-vuln", 362),
         ("cwe367-vuln", 367),

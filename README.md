@@ -172,8 +172,8 @@ never written from, nor applied to, a half-finished run.
 
 | Architecture | Checks that run |
 |---|---|
-| **x86_64 (AMD64)** | all checks (CWE-22, 78, 119, 125, 134, 190, 338, 362, 367, 369, 377, 401, 415, 416, 476, 676, 732, 787) |
-| **AArch64 (ARM64)** | all checks — the call-site-driven checks (**CWE-22**, **CWE-78**, **CWE-125**, **CWE-338**, **CWE-362**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**, **CWE-134**, **CWE-401**, **CWE-415**, **CWE-416**, **CWE-369**, **CWE-119**, **CWE-787**, **CWE-476**) |
+| **x86_64 (AMD64)** | all checks (CWE-22, 78, 119, 125, 134, 190, 327, 338, 362, 367, 369, 377, 401, 415, 416, 476, 676, 732, 787) |
+| **AArch64 (ARM64)** | all checks — the call-site-driven checks (**CWE-22**, **CWE-78**, **CWE-125**, **CWE-327**, **CWE-338**, **CWE-362**, **CWE-367**, **CWE-377**, **CWE-676**) plus the arch-aware register-level checks (**CWE-732**, **CWE-190**, **CWE-134**, **CWE-401**, **CWE-415**, **CWE-416**, **CWE-369**, **CWE-119**, **CWE-787**, **CWE-476**) |
 
 On an AArch64 target, the **CWE-732** permission check runs natively: its register
 reasoning only reads a single mode/mask *immediate* out of the AAPCS64 argument
@@ -890,6 +890,59 @@ autopsy --binary tests/fixtures/cwe338-vuln --checks 338 --format json
   ],
   "evidence": "call to weak PRNG rand() in weak_token: rand() is a predictable non-cryptographic PRNG; its output can be reconstructed from the seed; prefer getrandom / arc4random",
   "confidence": "medium"
+}
+```
+
+### CWE-327 — use of a broken or risky cryptographic algorithm
+
+A call to a cryptographic primitive whose algorithm is known to be broken or
+risky by modern standards: MD2, MD4, MD5, SHA-1, single DES, 3DES/TDEA, RC4,
+RC2, or Blowfish. These primitives are not safe for security-relevant use —
+MD5/SHA-1 collisions are practical (the SHAttered chosen-prefix attack on SHA-1;
+Wang's MD5 collision attack), single DES has a 56-bit key brute-forceable in
+hours, 3DES and Blowfish carry Sweet32 (64-bit block size exploited by
+Bhargavan-Leurent 2016), and RC4 has practical biases (NOMORE attack 2015; RFC
+7465 prohibits it in TLS). NIST SP 800-131A has formally disallowed them for
+security purposes.
+
+The check flags both the **direct OpenSSL API** (`MD5`/`MD5_Init`, `SHA1`/
+`SHA1_Init`, `DES_encrypt1`/`DES_cbc_encrypt`/`DES_ede3_cbc_encrypt`,
+`DES_set_key`, `RC4`/`RC4_set_key`, `RC2_encrypt`/`RC2_cbc_encrypt`,
+`BF_encrypt`/`BF_cbc_encrypt`/`BF_set_key`) and the **EVP constructor calls**
+that name a broken primitive (`EVP_md5`/`EVP_md4`/`EVP_md2`/`EVP_md5_sha1`,
+`EVP_sha1`, `EVP_des_cbc`/`EVP_des_ecb`/`EVP_des_cfb`/`EVP_des_ofb`/`EVP_des_ede`/
+`EVP_des_ede_cbc`/`EVP_des_ede3`/`EVP_des_ede3_cbc`, `EVP_rc4`/`EVP_rc4_40`,
+`EVP_rc2_cbc`/`EVP_rc2_40_cbc`, `EVP_bf_cbc`/`EVP_bf_ecb`). The `crypt` and
+`crypt_r` family are also flagged — `crypt()` with a two-character DES salt is
+the classic broken password hash, and even the MD5 variant (`$1$`) is too fast
+for password storage. Like CWE-676, CWE-377, and CWE-338, this detector needs
+no attacker-input source: the *use of the broken primitive itself* is the
+weakness.
+
+This is a **call-site-driven** detector — it resolves direct calls by symbol
+name and never inspects registers — so it is architecture-agnostic and runs on
+both x86_64 and AArch64.
+
+Confidence is `"high"` for the most definitively broken primitives (MD5, SHA-1,
+single DES, RC4, and their EVP equivalents), where no interop excuse is
+credible; `"medium"` for 3DES, Blowfish, MD2/MD4, RC2, and `crypt`/`crypt_r`,
+where legacy interop is occasionally unavoidable and the call site alone cannot
+prove the primitive is used for a fresh security decision.
+
+```bash
+autopsy --binary tests/fixtures/cwe327-vuln --checks 327 --format json
+```
+
+```json
+{
+  "cwe": 327,
+  "function": "weak_hash",
+  "address": "0x401140",
+  "taint_trace": [
+    {"address": "0x401140", "description": "use of broken/risky cryptographic primitive MD5()"}
+  ],
+  "evidence": "call to broken/risky cryptographic primitive MD5() in weak_hash: MD5 is a broken hash (chosen-prefix collisions are practical; not safe for signatures or auth); prefer SHA-256 / SHA-3 / BLAKE2",
+  "confidence": "high"
 }
 ```
 

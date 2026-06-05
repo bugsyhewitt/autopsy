@@ -17,7 +17,7 @@ CFLAGS  ?= -O0 -fno-stack-protector -no-pie -g
 ARCH    ?= -m64
 
 SRCS := cwe119-vuln.c cwe125-vuln.c cwe190-vuln.c cwe22-vuln.c cwe338-vuln.c cwe362-vuln.c cwe367-vuln.c cwe369-vuln.c cwe377-vuln.c cwe401-vuln.c cwe415-vuln.c cwe415-interproc-vuln.c cwe416-vuln.c cwe416-interproc-vuln.c cwe476-vuln.c cwe78-vuln.c cwe134-vuln.c cwe676-vuln.c cwe732-vuln.c cwe787-vuln.c clean-baseline.c
-BINS := $(SRCS:.c=)
+BINS := $(SRCS:.c=) cwe327-vuln
 
 # AArch64 (ARM64) CWE-78 fixture. The host is x86_64, so the binary is built
 # freestanding (no libc headers) with clang's cross target and linked statically
@@ -35,6 +35,14 @@ all: $(BINS) aarch64
 
 %: %.c
 	$(CC) $(ARCH) $(CFLAGS) -o $@ $<
+
+# CWE-327 fixture links OpenSSL libcrypto so the broken-crypto symbols
+# (MD5/SHA1/EVP_md5/EVP_des_cbc) show up as direct PLT call targets that the
+# call-site-driven check can resolve by name. -Wno-deprecated-declarations
+# silences the OpenSSL 3 deprecation warnings for the legacy primitives the
+# fixture is intentionally exercising.
+cwe327-vuln: cwe327-vuln.c
+	$(CC) $(ARCH) $(CFLAGS) -Wno-deprecated-declarations -o $@ $< -lcrypto
 
 aarch64: cwe78-aarch64-vuln cwe732-aarch64-vuln cwe190-aarch64-vuln cwe134-aarch64-vuln cwe415-aarch64-vuln cwe416-aarch64-vuln cwe369-aarch64-vuln cwe119-aarch64-vuln cwe787-aarch64-vuln cwe476-aarch64-vuln
 
