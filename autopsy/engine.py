@@ -144,8 +144,10 @@ class AngrEngine:
     #     in ``checks/cwe415.py`` knows both the x86_64 (``rax``/``rdi``; ``mov``
     #     slot store/reload over ``[rbp-N]``/``[rsp-N]``) and the AArch64
     #     (``x0``; ``str``/``ldr`` over ``[sp,#N]``/``[x29,#N]``) forms, so it is
-    #     sound on AArch64 too. (Its single-hop interprocedural companion pass
-    #     remains x86_64-only and simply reports nothing on AArch64.)
+    #     sound on AArch64 too. Its single-hop interprocedural companion pass
+    #     (``cwe415_interproc``) is also arch-aware: the engine helpers
+    #     ``_frees_incoming_arg``, ``caller_frees_arg_before_call``, and
+    #     ``_slots_aliasing_x0_before`` carry AArch64 AAPCS64 profiles.
     #
     #     CWE-369 (divide-by-zero) locates a division whose divisor is not
     #     guarded by a preceding zero-check; ``divisions_with_unguarded_divisor``
@@ -163,9 +165,11 @@ class AngrEngine:
     #     free with no intervening call; ``checks.cwe416`` carries x86_64
     #     (``rax``/``rdi``; ``mov`` over ``[rbp-N]``/``[rsp-N]``; deref ``[rax]``)
     #     and AArch64 (``x0``; ``str``/``ldr`` over ``[sp,#N]``/``[x29,#N]``;
-    #     deref ``[x9]``) profiles, so it is sound on AArch64 too. (Its
-    #     single-hop interprocedural companion pass remains x86_64-only and
-    #     reports nothing on AArch64.)
+    #     deref ``[x9]``) profiles, so it is sound on AArch64 too. Its
+    #     single-hop interprocedural companion pass (``cwe416_interproc``) is
+    #     also arch-aware: the engine helpers ``_frees_incoming_arg``,
+    #     ``caller_uses_arg_after_call``, and ``_caller_uses_arg_after_call_aarch64``
+    #     carry AArch64 AAPCS64 profiles alongside the SysV x86_64 ones.
     #
     #     CWE-119 (buffer over-read/write via an attacker-controlled index)
     #     locates a scaled-index memory access whose register index is derived
@@ -321,15 +325,15 @@ class AngrEngine:
         """Names of in-binary functions that call ``free`` on their argument.
 
         A function ``F`` is reported when its body contains a ``call free``
-        whose pointer argument (``rdi`` on x86_64) aliases ``F``'s first
-        incoming parameter — i.e. ``F`` frees a pointer handed to it by its
-        caller, rather than a pointer it allocated locally. These are the
-        callees that can leave a *caller-held* pointer dangling, which is the
-        single-hop cross-function use-after-free pattern (CWE-416) detected by
-        the interprocedural check.
+        (x86_64) / ``bl free`` (AArch64) whose pointer argument (``rdi`` on
+        x86_64; ``x0`` on AArch64) aliases ``F``'s first incoming parameter —
+        i.e. ``F`` frees a pointer handed to it by its caller, rather than a
+        pointer it allocated locally. These are the callees that can leave a
+        *caller-held* pointer dangling, which is the single-hop cross-function
+        use-after-free pattern (CWE-416) detected by the interprocedural check.
 
-        x86_64 only: the parameter/argument alias tracking uses the SysV
-        register conventions (first arg in ``rdi``).
+        Arch-aware: x86_64 (SysV, ``rdi`` first arg) and AArch64 (AAPCS64,
+        ``x0`` first arg).
         """
         cfg = self.cfg()
         names: set[str] = set()
@@ -347,7 +351,15 @@ class AngrEngine:
         to a stack slot in the prologue; before ``call free`` it reloads that
         slot into ``rdi``. We detect a ``call free`` whose ``rdi`` aliases the
         slot that the prologue ``mov [rbp-N], rdi`` stored the parameter into.
+
+        On AArch64 the first argument arrives in ``x0``. -O0 codegen spills it
+        with ``str x0, [sp, #N]`` / ``[x29, #N]``; before ``bl free`` it
+        reloads the slot into ``x0``.
         """
+        arch = self.project.arch.name
+        if arch == "AARCH64":
+            return self._frees_incoming_arg_aarch64(func, cfg)
+
         import re
 
         store_param = re.compile(
@@ -391,6 +403,80 @@ class AngrEngine:
                         return True
         return False
 
+    def _frees_incoming_arg_aarch64(self, func: Any, cfg: Any) -> bool:
+        """AArch64 mirror of :meth:`_frees_incoming_arg`.
+
+        Detects ``str x0, [sp, #N]`` / ``[x29, #N]`` (AAPCS64 first-arg
+        spill) followed by ``bl free`` where ``x0`` was reloaded from the same
+        slot.
+        """
+        import re
+
+        # ``str x0, [sp, #N]`` or ``str x0, [x29, #N]`` / ``[fp, #N]`` —
+        # the prologue spill of the first incoming argument.
+        store_param = re.compile(
+            r"^x0,\s*\[(sp|x29|fp)(?:,\s*(#[+\-]?(?:0x[0-9a-f]+|\d+)))?\]$"
+        )
+        load_slot = re.compile(
+            r"^(x[0-9]+),\s*\[(sp|x29|fp)(?:,\s*(#[+\-]?(?:0x[0-9a-f]+|\d+)))?\]$"
+        )
+        reg_copy = re.compile(r"^(x[0-9]+),\s*(x[0-9]+)$")
+
+        insns: list[Any] = []
+        for block in func.blocks:
+            try:
+                insns.extend(block.capstone.insns)
+            except Exception:  # pragma: no cover - defensive
+                continue
+        insns.sort(key=lambda i: i.address)
+
+        # On AArch64 ``x0`` is both the first incoming parameter register and
+        # the call return register. To distinguish a parameter spill
+        # (``str x0, [sp, #N]`` in the prologue) from a return-value store
+        # (``bl malloc ; str x0, [sp, #N]``), we only accept a ``str x0, ...``
+        # as the parameter spill if no ``bl`` has been seen yet in the function
+        # — i.e. it is in the prologue before any call.
+        param_slot: str | None = None
+        seen_call = False
+        for idx, insn in enumerate(insns):
+            if insn.mnemonic == "bl":
+                if param_slot is not None:
+                    # Check if this bl is `free`
+                    pass  # fall through to the "if insn.mnemonic == 'bl'" check below
+                else:
+                    # No param spill yet and we see a bl: mark that a call
+                    # has preceded any subsequent str x0 — that str would be a
+                    # return-value store, not a parameter spill.
+                    seen_call = True
+            # AArch64 spill: ``str x0, [sp/x29/fp, #N]`` — only accept in
+            # the prologue (before the first bl).
+            if insn.mnemonic == "str" and not seen_call:
+                m = store_param.match(insn.op_str)
+                if m and param_slot is None:
+                    off = m.group(2) if m.lastindex and m.lastindex >= 2 else None
+                    param_slot = f"{m.group(1)}{(off or '').replace(' ', '').lstrip('#') or '+0'}"
+                    continue
+            # AArch64 call: ``bl <free>``
+            if insn.mnemonic == "bl" and param_slot is not None:
+                target = self._resolve_call_target(insn, cfg)
+                if target == "free":
+                    # Does x0 alias param_slot immediately before this bl?
+                    aliases: set[str] = set()
+                    for prev in insns[max(0, idx - 8): idx]:
+                        ml = load_slot.match(prev.op_str)
+                        if prev.mnemonic == "ldr" and ml:
+                            off = ml.group(3) if ml.lastindex and ml.lastindex >= 3 else None
+                            key = f"{ml.group(2)}{(off or '').replace(' ', '').lstrip('#') or '+0'}"
+                            if key == param_slot:
+                                aliases.add(ml.group(1))
+                                continue
+                        mc = reg_copy.match(prev.op_str)
+                        if prev.mnemonic == "mov" and mc and mc.group(2) in aliases:
+                            aliases.add(mc.group(1))
+                    if "x0" in aliases:
+                        return True
+        return False
+
     def callers_of(self, name: str) -> list[CallSite]:
         """Every in-binary call site that targets the function ``name``.
 
@@ -429,17 +515,21 @@ class AngrEngine:
 
         In caller ``caller_name``, locate the call instruction at
         ``call_addr``. The pointer passed to it lives in ``rdi`` (x86_64 SysV
-        first argument), which -O0 codegen sources from a stack slot. After the
-        call returns, if that same stack slot is reloaded and dereferenced
-        (memory access through the reloaded register) before any other call,
-        return the address of that dereference; otherwise ``None``.
+        first argument) / ``x0`` (AArch64 AAPCS64), which -O0 codegen sources
+        from a stack slot. After the call returns, if that same stack slot is
+        reloaded and dereferenced (memory access through the reloaded register)
+        before any other call, return the address of that dereference; otherwise
+        ``None``.
 
         This is the caller-side half of the single-hop cross-function
         use-after-free: the caller hands a pointer to a callee that frees it,
         then uses the now-dangling pointer.
 
-        x86_64 only.
+        Arch-aware: x86_64 and AArch64.
         """
+        if self.project.arch.name == "AARCH64":
+            return self._caller_uses_arg_after_call_aarch64(caller_name, call_addr)
+
         import re
 
         load_slot = re.compile(
@@ -504,17 +594,97 @@ class AngrEngine:
                 return insn.address
         return None
 
+    def _caller_uses_arg_after_call_aarch64(
+        self, caller_name: str, call_addr: int
+    ) -> int | None:
+        """AArch64 mirror of :meth:`caller_uses_arg_after_call`.
+
+        Uses AAPCS64 conventions: first argument in ``x0`` spilled via
+        ``str x0, [sp/x29, #N]``; reload via ``ldr xR, [sp/x29, #N]``;
+        dereference detected when any instruction reads ``[xR]`` where ``xR``
+        aliases the slot.  Stops at the next ``bl`` (single-hop scope).
+        """
+        import re
+
+        load_slot = re.compile(
+            r"^(x[0-9]+),\s*\[(sp|x29|fp)(?:,\s*(#[+\-]?(?:0x[0-9a-f]+|\d+)))?\]$"
+        )
+        reg_copy = re.compile(r"^(x[0-9]+),\s*(x[0-9]+)$")
+        deref_base = re.compile(r"\[(x[0-9]+)")
+
+        cfg = self.cfg()
+        func = None
+        for f in cfg.kb.functions.values():
+            if f.name == caller_name:
+                func = f
+                break
+        if func is None:
+            return None
+
+        insns: list[Any] = []
+        for block in func.blocks:
+            try:
+                insns.extend(block.capstone.insns)
+            except Exception:  # pragma: no cover - defensive
+                continue
+        insns.sort(key=lambda i: i.address)
+
+        call_idx = next(
+            (i for i, ins in enumerate(insns) if ins.address == call_addr), None
+        )
+        if call_idx is None:
+            return None
+
+        # Determine which stack slot supplied x0 to this call.
+        arg_slot: str | None = None
+        x0_aliases: set[str] = {"x0"}
+        for prev in reversed(insns[max(0, call_idx - 8): call_idx]):
+            mc = reg_copy.match(prev.op_str)
+            if prev.mnemonic == "mov" and mc and mc.group(1) in x0_aliases:
+                x0_aliases.add(mc.group(2))
+                continue
+            ml = load_slot.match(prev.op_str)
+            if prev.mnemonic == "ldr" and ml and ml.group(1) in x0_aliases:
+                off = ml.group(3) if ml.lastindex and ml.lastindex >= 3 else None
+                arg_slot = f"{ml.group(2)}{(off or '').replace(' ', '').lstrip('#') or '+0'}"
+                break
+        if arg_slot is None:
+            return None
+
+        # After the bl: reload arg_slot, look for dereference, stop at next bl.
+        alias_regs: set[str] = set()
+        for insn in insns[call_idx + 1:]:
+            if insn.mnemonic == "bl":
+                return None
+            if insn.mnemonic == "ldr":
+                ml = load_slot.match(insn.op_str)
+                if ml:
+                    off = ml.group(3) if ml.lastindex and ml.lastindex >= 3 else None
+                    key = f"{ml.group(2)}{(off or '').replace(' ', '').lstrip('#') or '+0'}"
+                    if key == arg_slot:
+                        alias_regs.add(ml.group(1))
+                        continue
+            if insn.mnemonic == "mov":
+                mc = reg_copy.match(insn.op_str)
+                if mc and mc.group(2) in alias_regs:
+                    alias_regs.add(mc.group(1))
+                    continue
+            md = deref_base.search(insn.op_str)
+            if md and md.group(1) in alias_regs:
+                return insn.address
+        return None
+
     def caller_frees_arg_before_call(self, caller_name: str, call_addr: int) -> int | None:
         """Detect that the call's pointer argument was already freed by the caller.
 
         In caller ``caller_name``, locate the call instruction at ``call_addr``
         (a call to an in-binary helper that frees its argument). The pointer
-        passed to it lives in ``rdi`` (x86_64 SysV first argument), which -O0
-        codegen sources from a stack slot. If that *same* stack slot was handed
-        to ``free`` *earlier in the same function*, with no intervening
-        reallocation (``malloc``/``calloc``/``realloc``) that would overwrite
-        the slot, return the address of that earlier ``free`` call; otherwise
-        ``None``.
+        passed to it lives in ``rdi`` (x86_64 SysV first argument) / ``x0``
+        (AArch64 AAPCS64), which -O0 codegen sources from a stack slot. If
+        that *same* stack slot was handed to ``free`` *earlier in the same
+        function*, with no intervening reallocation (``malloc``/``calloc``/
+        ``realloc``) that would overwrite the slot, return the address of that
+        earlier ``free`` call; otherwise ``None``.
 
         This is the caller-side half of the single-hop cross-function
         double-free (CWE-415): the caller frees a pointer, then passes it to a
@@ -523,9 +693,11 @@ class AngrEngine:
         the callee frees, i.e. CWE-416); here the second event is a second
         ``free`` rather than a use.
 
-        x86_64 only: the alias tracking relies on the SysV first-argument
-        register (``rdi``) and -O0 stack-slot spill conventions.
+        Arch-aware: x86_64 (SysV ``rdi``) and AArch64 (AAPCS64 ``x0``).
         """
+        if self.project.arch.name == "AARCH64":
+            return self._caller_frees_arg_before_call_aarch64(caller_name, call_addr)
+
         import re
 
         load_slot = re.compile(
@@ -595,6 +767,131 @@ class AngrEngine:
                 # Any non-free call before our free candidate is irrelevant to
                 # whether the slot was freed; keep scanning back.
         return None
+
+    def _caller_frees_arg_before_call_aarch64(
+        self, caller_name: str, call_addr: int
+    ) -> int | None:
+        """AArch64 mirror of :meth:`caller_frees_arg_before_call`.
+
+        Uses AAPCS64 conventions: ``x0`` first arg spilled/loaded via
+        ``str``/``ldr`` over ``[sp/x29, #N]``; ``bl free`` for the earlier
+        free call.  A ``str x0, [sp/x29, #N]`` following a ``bl malloc``
+        (i.e. a reallocation into the slot) cancels the candidate.
+        """
+        import re
+
+        load_slot = re.compile(
+            r"^(x[0-9]+),\s*\[(sp|x29|fp)(?:,\s*(#[+\-]?(?:0x[0-9a-f]+|\d+)))?\]$"
+        )
+        store_to_slot = re.compile(
+            r"^x[0-9]+,\s*\[(sp|x29|fp)(?:,\s*(#[+\-]?(?:0x[0-9a-f]+|\d+)))?\]$"
+        )
+        reg_copy = re.compile(r"^(x[0-9]+),\s*(x[0-9]+)$")
+
+        cfg = self.cfg()
+        func = None
+        for f in cfg.kb.functions.values():
+            if f.name == caller_name:
+                func = f
+                break
+        if func is None:
+            return None
+
+        insns: list[Any] = []
+        for block in func.blocks:
+            try:
+                insns.extend(block.capstone.insns)
+            except Exception:  # pragma: no cover - defensive
+                continue
+        insns.sort(key=lambda i: i.address)
+
+        call_idx = next(
+            (i for i, ins in enumerate(insns) if ins.address == call_addr), None
+        )
+        if call_idx is None:
+            return None
+
+        # Determine the stack slot that x0 was loaded from before this call.
+        arg_slot: str | None = None
+        x0_aliases: set[str] = {"x0"}
+        for prev in reversed(insns[max(0, call_idx - 8): call_idx]):
+            mc = reg_copy.match(prev.op_str)
+            if prev.mnemonic == "mov" and mc and mc.group(1) in x0_aliases:
+                x0_aliases.add(mc.group(2))
+                continue
+            ml = load_slot.match(prev.op_str)
+            if prev.mnemonic == "ldr" and ml and ml.group(1) in x0_aliases:
+                off = ml.group(3) if ml.lastindex and ml.lastindex >= 3 else None
+                arg_slot = f"{ml.group(2)}{(off or '').replace(' ', '').lstrip('#') or '+0'}"
+                break
+        if arg_slot is None:
+            return None
+
+        # Scan backward for an earlier ``bl free`` whose x0 aliased arg_slot.
+        # Abort if the slot is reallocated (``str x0, [slot]`` following a
+        # ``bl malloc|calloc|realloc``).
+        for idx in range(call_idx - 1, -1, -1):
+            insn = insns[idx]
+            if insn.mnemonic == "str":
+                ms = store_to_slot.match(insn.op_str)
+                if ms:
+                    off = ms.group(2) if ms.lastindex and ms.lastindex >= 2 else None
+                    key = f"{ms.group(1)}{(off or '').replace(' ', '').lstrip('#') or '+0'}"
+                    if key == arg_slot:
+                        if self._slot_store_follows_alloc_aarch64(insns, idx, cfg):
+                            return None
+                continue
+            if insn.mnemonic == "bl":
+                target = self._resolve_call_target(insn, cfg)
+                if target == "free":
+                    if arg_slot in self._slots_aliasing_x0_before(insns, idx):
+                        return insn.address
+        return None
+
+    def _slot_store_follows_alloc_aarch64(
+        self, insns: list, store_idx: int, cfg: Any
+    ) -> bool:
+        """AArch64 mirror of :meth:`_slot_store_follows_alloc`.
+
+        Returns ``True`` if the ``str xR, [slot]`` at ``store_idx`` writes the
+        result of a ``bl malloc|calloc|realloc`` (i.e. ``x0``) immediately
+        before it — indicating the slot is being (re)allocated, not re-spilled.
+        """
+        import re
+
+        reg = re.compile(r"^(x[0-9]+),\s*\[")
+        m = reg.match(insns[store_idx].op_str)
+        src = m.group(1) if m else None
+        if src is None:
+            return False
+        for prev in insns[max(0, store_idx - 4): store_idx]:
+            if prev.mnemonic == "bl":
+                if self._resolve_call_target(prev, cfg) in {"malloc", "calloc", "realloc"}:
+                    # malloc/calloc/realloc returns in x0 on AArch64.
+                    return src == "x0"
+        return False
+
+    def _slots_aliasing_x0_before(self, insns: list, call_idx: int) -> set[str]:
+        """Stack slots that aliased ``x0`` in the instructions before a ``bl``."""
+        import re
+
+        load_slot = re.compile(
+            r"^(x[0-9]+),\s*\[(sp|x29|fp)(?:,\s*(#[+\-]?(?:0x[0-9a-f]+|\d+)))?\]$"
+        )
+        reg_copy = re.compile(r"^(x[0-9]+),\s*(x[0-9]+)$")
+
+        x0_aliases: set[str] = {"x0"}
+        slots: set[str] = set()
+        for prev in reversed(insns[max(0, call_idx - 8): call_idx]):
+            mc = reg_copy.match(prev.op_str)
+            if prev.mnemonic == "mov" and mc and mc.group(1) in x0_aliases:
+                x0_aliases.add(mc.group(2))
+                continue
+            ml = load_slot.match(prev.op_str)
+            if prev.mnemonic == "ldr" and ml and ml.group(1) in x0_aliases:
+                off = ml.group(3) if ml.lastindex and ml.lastindex >= 3 else None
+                slots.add(f"{ml.group(2)}{(off or '').replace(' ', '').lstrip('#') or '+0'}")
+        return slots
 
     def _slot_store_follows_alloc(self, insns: list, store_idx: int, cfg: Any) -> bool:
         """True if the store at ``store_idx`` writes a malloc-family result.

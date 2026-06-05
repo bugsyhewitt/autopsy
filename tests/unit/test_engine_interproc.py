@@ -1,10 +1,10 @@
-"""Fast unit tests for the engine's interprocedural CWE-416 helpers.
+"""Fast unit tests for the engine's interprocedural CWE-415/416 helpers.
 
 angr-free. ``AngrEngine`` is built via ``__new__`` (bypassing the angr-loading
 ``__init__``) and handed a synthetic CFG whose blocks expose capstone-style
 instruction objects. This exercises ``in_binary_callees_freeing_arg``,
-``_frees_incoming_arg``, ``callers_of``, and ``caller_uses_arg_after_call``
-without importing angr.
+``_frees_incoming_arg``, ``callers_of``, ``caller_uses_arg_after_call``, and
+``caller_frees_arg_before_call`` without importing angr.
 
 The synthetic instructions mirror the -O0 x86_64 codegen of the
 ``cwe416-interproc-vuln`` fixture (Intel syntax, as capstone renders it):
@@ -12,6 +12,12 @@ The synthetic instructions mirror the -O0 x86_64 codegen of the
     release(p):  mov [rbp - 8], rdi ; mov rax,[rbp - 8] ; mov rdi,rax ; call free
     run():       ... mov rax,[rbp - 8] ; mov rdi,rax ; call release
                  mov rax,[rbp - 8] ; movb [rax], 0x5a   (use-after-free)
+
+AArch64 equivalents (AAPCS64 / -O0 GCC / capstone AT&T-like syntax):
+
+    release(p):  str x0, [sp, #8] ; ldr x0, [sp, #8] ; bl free
+    run():       ... ldr x0, [sp, #8] ; bl release
+                 ldr x9, [sp, #8] ; str x9, [x9]   (use-after-free)
 """
 
 from __future__ import annotations
@@ -301,3 +307,224 @@ def test_reallocation_between_frees_cancels_candidate():
 def test_caller_frees_returns_none_for_unknown_caller():
     eng = _engine([_free_plt(), _malloc_plt(), _release_func(), _df_run_func()])
     assert eng.caller_frees_arg_before_call("ghost", 0x401234) is None
+
+
+# ===========================================================================
+# AArch64 (AAPCS64) tests for the interprocedural helpers
+# ===========================================================================
+#
+# Synthetic AAPCS64 -O0 codegen:
+#
+#   release(p):
+#     str  x0, [sp, #8]      ; spill first arg (x0)
+#     ldr  x0, [sp, #8]      ; reload to set x0 for bl free
+#     bl   <free>
+#
+#   run() — CWE-416 shape (use after callee frees):
+#     ldr  x0, [sp, #8]      ; load pointer into x0
+#     bl   <release>         ; callee frees it
+#     ldr  x9, [sp, #8]      ; reload the freed pointer
+#     str  w0, [x9]          ; dereference (UAF)
+#
+#   run() — CWE-415 shape (caller frees first):
+#     ldr  x0, [sp, #8]      ; load pointer
+#     bl   <free>            ; FIRST free by caller
+#     ldr  x0, [sp, #8]      ; reload pointer
+#     bl   <release>         ; SECOND free via callee
+# ---------------------------------------------------------------------------
+
+AA_FREE_ADDR = 0x501030
+AA_RELEASE_ADDR = 0x501136
+AA_RUN_ADDR = 0x501151
+AA_MALLOC_ADDR = 0x501040
+
+
+class _AArch64Arch:
+    name = "AARCH64"
+
+
+class _AArch64Project:
+    def __init__(self):
+        self.arch = _AArch64Arch()
+        self.loader = _Loader()
+
+
+def _aa_engine(funcs):
+    """Build an AArch64 AngrEngine stub."""
+    eng = AngrEngine.__new__(AngrEngine)
+    eng.project = _AArch64Project()
+    eng._cfg = _Cfg(funcs)
+    return eng
+
+
+def _aa_free_plt():
+    return _Func(AA_FREE_ADDR, "free", [], is_plt=True)
+
+
+def _aa_malloc_plt():
+    return _Func(AA_MALLOC_ADDR, "malloc", [], is_plt=True)
+
+
+def _aa_release_func():
+    """AArch64 release(p): spills x0, reloads to x0, bl free."""
+    insns = [
+        _Insn(AA_RELEASE_ADDR + 0x4, "str", "x0, [sp, #8]"),      # spill first arg
+        _Insn(AA_RELEASE_ADDR + 0x8, "ldr", "x0, [sp, #8]"),      # reload for free
+        _Insn(AA_RELEASE_ADDR + 0xC, "bl", hex(AA_FREE_ADDR)),     # bl free
+    ]
+    return _Func(AA_RELEASE_ADDR, "release", insns)
+
+
+def _aa_run_func_uaf(use=True):
+    """AArch64 run(): passes [sp,#8] to release(), then dereferences it."""
+    insns = [
+        _Insn(AA_RUN_ADDR + 0x20, "ldr", "x0, [sp, #8]"),         # load pointer
+        _Insn(AA_RUN_ADDR + 0x24, "bl", hex(AA_RELEASE_ADDR)),     # bl release
+    ]
+    if use:
+        insns += [
+            _Insn(AA_RUN_ADDR + 0x28, "ldr", "x9, [sp, #8]"),     # reload freed ptr
+            _Insn(AA_RUN_ADDR + 0x2C, "str", "w0, [x9]"),         # deref (UAF)
+        ]
+    return _Func(AA_RUN_ADDR, "run", insns)
+
+
+def _aa_run_func_df(freed_first=True, realloc_between=False):
+    """AArch64 run(): optionally frees [sp,#8] first, then passes to release()."""
+    insns = [
+        _Insn(AA_RUN_ADDR + 0x10, "bl", hex(AA_MALLOC_ADDR)),      # malloc
+        _Insn(AA_RUN_ADDR + 0x14, "str", "x0, [sp, #8]"),          # store result
+    ]
+    if freed_first:
+        insns += [
+            _Insn(AA_RUN_ADDR + 0x20, "ldr", "x0, [sp, #8]"),     # load pointer
+            _Insn(AA_RUN_ADDR + 0x24, "bl", hex(AA_FREE_ADDR)),    # FIRST free
+        ]
+    if realloc_between:
+        insns += [
+            _Insn(AA_RUN_ADDR + 0x28, "bl", hex(AA_MALLOC_ADDR)),  # realloc
+            _Insn(AA_RUN_ADDR + 0x2C, "str", "x0, [sp, #8]"),     # write new ptr to slot
+        ]
+    insns += [
+        _Insn(AA_RUN_ADDR + 0x30, "ldr", "x0, [sp, #8]"),         # load pointer
+        _Insn(AA_RUN_ADDR + 0x34, "bl", hex(AA_RELEASE_ADDR)),     # SECOND free (callee)
+    ]
+    return _Func(AA_RUN_ADDR, "run", insns)
+
+
+AA_RUN_BL_RELEASE_UAF = AA_RUN_ADDR + 0x24
+AA_RUN_UAF_DEREF = AA_RUN_ADDR + 0x2C
+AA_RUN_FIRST_FREE = AA_RUN_ADDR + 0x24
+AA_RUN_BL_RELEASE_DF = AA_RUN_ADDR + 0x34
+
+
+# ---------------------------------------------------------------------------
+# AArch64: _frees_incoming_arg / in_binary_callees_freeing_arg
+# ---------------------------------------------------------------------------
+
+
+def test_aarch64_release_detected_as_freeing_its_argument():
+    eng = _aa_engine([_aa_free_plt(), _aa_release_func(), _aa_run_func_uaf()])
+    assert "release" in eng.in_binary_callees_freeing_arg()
+
+
+def test_aarch64_plt_not_reported_as_freeing_arg():
+    eng = _aa_engine([_aa_free_plt(), _aa_release_func(), _aa_run_func_uaf()])
+    assert "free" not in eng.in_binary_callees_freeing_arg()
+
+
+def test_aarch64_function_freeing_local_alloc_not_reported():
+    """A function that mallocs locally and frees the result is not a cross-func source."""
+    insns = [
+        _Insn(0x502000, "bl", hex(AA_MALLOC_ADDR)),             # malloc
+        _Insn(0x502004, "str", "x0, [sp, #8]"),                # store result
+        _Insn(0x502008, "ldr", "x0, [sp, #8]"),                # reload
+        _Insn(0x50200C, "bl", hex(AA_FREE_ADDR)),               # free (local alloc, not param)
+    ]
+    local = _Func(0x502000, "local_free", insns)
+    eng = _aa_engine([_aa_free_plt(), _aa_malloc_plt(), local])
+    assert "local_free" not in eng.in_binary_callees_freeing_arg()
+
+
+# ---------------------------------------------------------------------------
+# AArch64: callers_of  (arch-agnostic — bl is already in _CALL_MNEMONICS)
+# ---------------------------------------------------------------------------
+
+
+def test_aarch64_callers_of_finds_run_calling_release():
+    eng = _aa_engine([_aa_free_plt(), _aa_release_func(), _aa_run_func_uaf()])
+    callers = eng.callers_of("release")
+    assert len(callers) == 1
+    assert callers[0].caller_function == "run"
+    assert callers[0].call_address == AA_RUN_BL_RELEASE_UAF
+
+
+# ---------------------------------------------------------------------------
+# AArch64: caller_uses_arg_after_call
+# ---------------------------------------------------------------------------
+
+
+def test_aarch64_caller_use_after_call_detected():
+    eng = _aa_engine([_aa_free_plt(), _aa_release_func(), _aa_run_func_uaf(use=True)])
+    use_addr = eng.caller_uses_arg_after_call("run", AA_RUN_BL_RELEASE_UAF)
+    assert use_addr == AA_RUN_UAF_DEREF
+
+
+def test_aarch64_caller_no_use_after_call_returns_none():
+    eng = _aa_engine([_aa_free_plt(), _aa_release_func(), _aa_run_func_uaf(use=False)])
+    assert eng.caller_uses_arg_after_call("run", AA_RUN_BL_RELEASE_UAF) is None
+
+
+def test_aarch64_caller_use_after_intervening_call_not_reported():
+    """A second bl between the freeing call and the deref breaks single-hop scope."""
+    insns = [
+        _Insn(AA_RUN_ADDR + 0x20, "ldr", "x0, [sp, #8]"),
+        _Insn(AA_RUN_ADDR + 0x24, "bl", hex(AA_RELEASE_ADDR)),     # bl release
+        _Insn(AA_RUN_ADDR + 0x28, "bl", hex(AA_FREE_ADDR)),        # intervening bl
+        _Insn(AA_RUN_ADDR + 0x2C, "ldr", "x9, [sp, #8]"),
+        _Insn(AA_RUN_ADDR + 0x30, "str", "w0, [x9]"),
+    ]
+    caller = _Func(AA_RUN_ADDR, "run2", insns)
+    eng = _aa_engine([_aa_free_plt(), _aa_release_func(), caller])
+    assert eng.caller_uses_arg_after_call("run2", AA_RUN_ADDR + 0x24) is None
+
+
+def test_aarch64_caller_use_returns_none_for_unknown_caller():
+    eng = _aa_engine([_aa_free_plt(), _aa_release_func(), _aa_run_func_uaf()])
+    assert eng.caller_uses_arg_after_call("ghost", 0x501234) is None
+
+
+# ---------------------------------------------------------------------------
+# AArch64: caller_frees_arg_before_call
+# ---------------------------------------------------------------------------
+
+
+def test_aarch64_caller_freed_arg_before_handoff_detected():
+    eng = _aa_engine(
+        [_aa_free_plt(), _aa_malloc_plt(), _aa_release_func(), _aa_run_func_df()]
+    )
+    addr = eng.caller_frees_arg_before_call("run", AA_RUN_BL_RELEASE_DF)
+    assert addr == AA_RUN_FIRST_FREE
+
+
+def test_aarch64_caller_did_not_free_first_returns_none():
+    eng = _aa_engine(
+        [_aa_free_plt(), _aa_malloc_plt(), _aa_release_func(),
+         _aa_run_func_df(freed_first=False)]
+    )
+    assert eng.caller_frees_arg_before_call("run", AA_RUN_BL_RELEASE_DF) is None
+
+
+def test_aarch64_reallocation_between_frees_cancels_candidate():
+    eng = _aa_engine(
+        [_aa_free_plt(), _aa_malloc_plt(), _aa_release_func(),
+         _aa_run_func_df(realloc_between=True)]
+    )
+    assert eng.caller_frees_arg_before_call("run", AA_RUN_BL_RELEASE_DF) is None
+
+
+def test_aarch64_caller_frees_returns_none_for_unknown_caller():
+    eng = _aa_engine(
+        [_aa_free_plt(), _aa_malloc_plt(), _aa_release_func(), _aa_run_func_df()]
+    )
+    assert eng.caller_frees_arg_before_call("ghost", 0x501234) is None
