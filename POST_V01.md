@@ -219,7 +219,13 @@ higher-fidelity intra finding wins). Cross-function findings carry
 `confidence: "medium"`. Scope is deliberately one hop only — deeper chains are
 not followed, preserving the zero-false-positive guarantee (verified on the
 clean baseline). A new fixture `tests/fixtures/cwe416-interproc-vuln.c` exercises
-the pattern; x86_64 only (SysV `rdi` first-arg + -O0 stack-slot conventions).
+the pattern. **AArch64 support for the interprocedural pass added in Rotation 36**:
+`_frees_incoming_arg`, `caller_uses_arg_after_call`, `caller_frees_arg_before_call`,
+and two new helpers (`_caller_uses_arg_after_call_aarch64`,
+`_caller_frees_arg_before_call_aarch64`, `_slot_store_follows_alloc_aarch64`,
+`_slots_aliasing_x0_before`) carry AAPCS64 (``x0`` first-arg, ``bl``, ``str``/``ldr``
+over ``[sp/x29, #N]``) profiles alongside the SysV x86_64 ones. 16 new unit tests
+cover all four AArch64 helper paths.
 
 **What it was:** Extend the CWE-416 check from purely intra-procedural (free and
 use in the same function) to detect the most common cross-function UAF pattern:

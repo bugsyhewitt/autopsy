@@ -47,9 +47,9 @@ parameter-based handoff is a structural match rather than a full data-flow
 proof. The intra-procedural double-free (both frees in one body, alias-confirmed
 with no intervening reallocation) remains ``"high"``.
 
-x86_64 only: the alias tracking relies on the SysV first-argument register
-(``rdi``) and -O0 stack-slot spill conventions, consistent with the
-register-level checks the engine already restricts to x86_64.
+Arch-aware (x86_64 + AArch64): the engine helpers ``in_binary_callees_freeing_arg``,
+``caller_frees_arg_before_call``, and ``callers_of`` handle both SysV/x86_64
+(``rdi``, ``call``) and AAPCS64/AArch64 (``x0``, ``bl``) conventions.
 """
 
 from __future__ import annotations

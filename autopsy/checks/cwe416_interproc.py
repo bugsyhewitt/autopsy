@@ -40,11 +40,9 @@ confirmed via stack-slot aliasing, but the single-hop, no-intervening-call
 restriction means this is a structural match rather than a full data-flow
 proof.
 
-x86_64 only: the alias tracking relies on the SysV first-argument register
-(``rdi``) and -O0 stack-slot spill conventions. (The intra-procedural CWE-415
-and CWE-416 passes — and the CWE-119 indexed-access check — have since been made
-arch-aware and run on AArch64 too; this single-hop interprocedural companion
-pass remains x86_64-only and simply reports nothing on AArch64.)
+Arch-aware (x86_64 + AArch64): the engine helpers ``in_binary_callees_freeing_arg``,
+``caller_uses_arg_after_call``, and ``callers_of`` now handle both SysV/x86_64
+(``rdi``, ``call``) and AAPCS64/AArch64 (``x0``, ``bl``) conventions.
 """
 
 from __future__ import annotations

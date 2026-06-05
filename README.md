@@ -189,22 +189,24 @@ argument out of the AAPCS64 register (`x0` for `printf`, `x1` for
 `fprintf`/`sprintf`/`syslog`, `x2` for `snprintf`) and recognizes both the x86_64
 rodata-literal form (`lea reg, [rip+disp]`) and the AArch64 one (`adrp`/`adr`); a
 stack-slot reload (`ldr x0, [sp, #N]`) is the non-literal/attacker-controlled
-format, so it runs on AArch64 too. The **CWE-415** intra-procedural double-free
-check is arch-aware as well: it tracks the allocator return register into a
-stack slot and the first-argument register handed to two successive `free`
-calls, and the scanner knows both the x86_64 form (`rax`/`rdi`; `mov` slot
-store/reload over `[rbp-N]`/`[rsp-N]`) and the AArch64 one (`x0`; `str`/`ldr`
-over `[sp,#N]`/`[x29,#N]`), so it runs on AArch64 too. (Its single-hop
-interprocedural companion pass remains x86_64-only and simply reports nothing on
-AArch64.) The **CWE-416** intra-procedural use-after-free check is arch-aware as
-well: it reuses the same allocation/free/stack-slot-aliasing machinery as
-CWE-415 but, after the `free`, watches for the freed pointer to be reloaded from
-its slot and **dereferenced** through that base register (with no intervening
-call); the scanner knows both the x86_64 form (`rax`/`rdi`; `mov` slot
-store/reload over `[rbp-N]`/`[rsp-N]`; deref `[rax]`) and the AArch64 one (`x0`;
-`str`/`ldr` over `[sp,#N]`/`[x29,#N]`; deref `[x9]`), so it runs on AArch64 too.
-(Its single-hop interprocedural companion pass remains x86_64-only and reports
-nothing on AArch64.) The **CWE-369** divide-by-zero check is arch-aware as well: it locates
+format, so it runs on AArch64 too. The **CWE-415** double-free check (both
+intra-procedural and single-hop interprocedural) is fully arch-aware: the
+intra-procedural scanner tracks the allocator return register into a stack slot
+and the first-argument register handed to two successive `free` calls, knowing
+both the x86_64 form (`rax`/`rdi`; `mov` slot store/reload over
+`[rbp-N]`/`[rsp-N]`) and the AArch64 one (`x0`; `str`/`ldr` over
+`[sp,#N]`/`[x29,#N]`), so it runs on AArch64. The single-hop interprocedural
+companion pass now also runs on AArch64: the engine helpers
+`_frees_incoming_arg`, `caller_frees_arg_before_call`, and
+`_slots_aliasing_x0_before` carry AAPCS64 (`x0` first-arg; `bl`; `str`/`ldr`
+over `[sp/x29, #N]`) profiles alongside the SysV x86_64 ones. The **CWE-416**
+use-after-free check (both intra-procedural and single-hop interprocedural) is
+similarly fully arch-aware: the intra-procedural scanner knows the x86_64 form
+(`rax`/`rdi`; `mov` slot store/reload over `[rbp-N]`/`[rsp-N]`; deref `[rax]`)
+and the AArch64 one (`x0`; `str`/`ldr` over `[sp,#N]`/`[x29,#N]`; deref
+`[x9]`). The single-hop interprocedural companion pass now also runs on AArch64:
+`caller_uses_arg_after_call` dispatches to an AArch64 mirror that tracks `x0`
+through `ldr`/`mov` into alias registers and detects the post-`bl` dereference. The **CWE-369** divide-by-zero check is arch-aware as well: it locates
 a division whose divisor is not guarded by a preceding zero-check, and the engine
 knows both the x86_64 form (`div`/`idiv` single divisor operand; guard via
 `cmp`/`test` + a conditional jump) and the AArch64 one (`sdiv`/`udiv` third
