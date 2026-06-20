@@ -7,7 +7,7 @@ multi-hundred-megabyte angr dependency. angr is imported lazily, only inside
 ``autopsy.engine`` when an actual analysis runs.
 """
 
-__version__ = "0.1.0"
+__version__ = "1.0.0"
 
 # pipeline_adapter is imported lazily to avoid pulling binary-pipeline
 # at the top level of ``autopsy`` for callers that don't need it.

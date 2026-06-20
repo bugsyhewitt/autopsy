@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autopsy"
-version = "0.1.0"
+version = "1.0.0"
 description = "angr-backed whole-program binary analysis with CWE-aligned vulnerability detection (ELF/x86_64)."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -41,6 +41,7 @@ packages = ["autopsy", "autopsy.checks"]
 testpaths = ["tests"]
 markers = [
     "slow: tests that import and run angr against real binaries (deselected by default)",
+    "ship_gate: v1.0 release ship-gate marker (wheel-build + version-source-of-truth + CHANGELOG existence)",
 ]
 # By default, do NOT run slow (angr) tests. Run them with: pytest -m slow
 addopts = "-m 'not slow'"

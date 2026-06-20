@@ -75,7 +75,7 @@ target yet) to discover what `--checks` tokens are available.
 
 ```bash
 autopsy --list-checks
-# autopsy 0.1.0 — available CWE detectors:
+# autopsy 1.0.0 — available CWE detectors:
 #
 #   CWE-119  Buffer Overflow
 #            --checks 119   https://cwe.mitre.org/data/definitions/119.html

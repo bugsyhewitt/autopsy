@@ -15,6 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 
 
+@pytest.mark.ship_gate
 def test_pyproject_version_matches_module_version():
     """pyproject.toml version MUST equal autopsy.__version__."""
     pkg = importlib.import_module("autopsy")
@@ -27,6 +28,7 @@ def test_pyproject_version_matches_module_version():
     )
 
 
+@pytest.mark.ship_gate
 def test_top_level_import_is_angr_free_at_runtime():
     """``import autopsy`` MUST succeed even when angr is unreachable.
 
@@ -47,9 +49,10 @@ def test_top_level_import_is_angr_free_at_runtime():
     assert result.returncode == 0, (
         f"angr-free import FAILED; stderr: {result.stderr!r}"
     )
-    assert result.stdout.strip() == "0.1.0"
+    assert result.stdout.strip() == "1.0.0"
 
 
+@pytest.mark.ship_gate
 def test_cli_version_is_wired():
     """``autopsy --version`` MUST print ``autopsy <version>``."""
     from autopsy.cli import build_parser
@@ -59,6 +62,7 @@ def test_cli_version_is_wired():
     assert excinfo.value.code == 0
 
 
+@pytest.mark.ship_gate
 def test_cwe_catalog_covers_every_fixture_label():
     """Every CWE id present in ``tests/fixtures/cwe*-vuln`` filenames
     MUST be registered in autopsy.checks.CHECKS (no unregistered detectors).
@@ -87,4 +91,19 @@ def test_cwe_catalog_covers_every_fixture_label():
     token_cwes = {int(t) for t in VALID_TOKENS if t != "all"}
     assert token_cwes == registered_cwes, (
         f"VALID_TOKENS ({token_cwes}) != CHECKS ({registered_cwes})"
+    )
+
+
+@pytest.mark.ship_gate
+def test_changelog_exists_with_v1_0_0_entry():
+    """``CHANGELOG.md`` MUST exist and contain a ``## [1.0.0]`` entry.
+
+    Pins the CHANGELOG contract against accidental deletion or future
+    version-string regressions.
+    """
+    changelog = REPO_ROOT / "CHANGELOG.md"
+    assert changelog.exists(), "CHANGELOG.md missing at repo root"
+    text = changelog.read_text()
+    assert "## [1.0.0]" in text, (
+        "CHANGELOG.md missing top-level '## [1.0.0]' entry"
     )
