@@ -1,5 +1,9 @@
 # autopsy
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/bugsyhewitt/bugsyhewitt.github.io/main/public/cards/autopsy.jpg" alt="autopsy" width="680">
+</p>
+
 **angr-backed, Python-native whole-program binary analysis with CWE-aligned
 vulnerability detection.**
 
