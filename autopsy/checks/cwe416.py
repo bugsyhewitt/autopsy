@@ -56,49 +56,31 @@ register's alias is rooted in a confirmed reload of the freed stack slot and
 
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass
-
 from autopsy.report import Finding, TaintPoint
 from autopsy.checks import cwe416_interproc
-
-
-@dataclass(frozen=True)
-class _ArchProfile:
-    """Architecture-specific register names and instruction recognizers.
-
-    ``store_ret_to_slot`` matches an instruction storing the allocator's return
-    register to a stack slot (groups: base, offset). ``load_slot_to_reg``
-    matches a slot reload into a register (groups: dst-reg, base, offset).
-    ``reg_copy`` matches a register-to-register move (groups: dst, src).
-    ``deref_base`` matches a memory dereference through a register base (group:
-    base reg). ``store_mn`` / ``load_mn`` are the mnemonics the store/load
-    recognizers apply to. ``arg_reg`` is the first-argument register handed to
-    ``free``.
-    """
-
-    arg_reg: str
-    store_mn: str
-    load_mn: str
-    store_ret_to_slot: re.Pattern[str]
-    load_slot_to_reg: re.Pattern[str]
-    reg_copy: re.Pattern[str]
-    deref_base: re.Pattern[str]
-
-
-# --- x86_64 (SysV) -----------------------------------------------------------
-# `mov qword ptr [rbp - 8], rax` -> store malloc result to a stack slot.
-_X86_STORE = re.compile(
-    r"^(?:qword ptr )?\[(rbp|rsp)\s*([+\-]\s*(?:0x[0-9a-f]+|\d+))\],\s*rax$"
+from autopsy.checks._slot_scan import (
+    _ArchProfile,
+    _X86_STORE,
+    _X86_LOAD,
+    _X86_COPY,
+    _X86_DEREF,
+    _AARCH64_STORE,
+    _AARCH64_LOAD,
+    _AARCH64_COPY,
+    _AARCH64_DEREF,
+    _profile_for,
+    _slot_key,
+    _flatten,
+    _slot_after_malloc,
+    _regs_aliasing_slot,
+    _is_call,
+    _resolve,
 )
-# `mov rax, qword ptr [rbp - 8]` -> reload a stack slot into a register.
-_X86_LOAD = re.compile(
-    r"^(r[a-z0-9]+),\s*(?:qword ptr )?\[(rbp|rsp)\s*([+\-]\s*(?:0x[0-9a-f]+|\d+))\]$"
-)
-# `mov rdi, rax` -> register-to-register copy.
-_X86_COPY = re.compile(r"^(r[a-z0-9]+),\s*(r[a-z0-9]+)$")
-# Memory dereference through a register base: `[rax]`, `[rax + 4]`, etc.
-_X86_DEREF = re.compile(r"\[(r[a-z0-9]+)")
+
+# ---------------------------------------------------------------------------
+# CWE-416 arch profiles (include deref_base to detect dereferences of the
+# freed pointer).
+# ---------------------------------------------------------------------------
 
 _X86_PROFILE = _ArchProfile(
     arg_reg="rdi",
@@ -109,23 +91,6 @@ _X86_PROFILE = _ArchProfile(
     reg_copy=_X86_COPY,
     deref_base=_X86_DEREF,
 )
-
-# --- AArch64 (AAPCS64) -------------------------------------------------------
-# `str x0, [sp, #0x8]` / `str x0, [x29, #-8]` -> store malloc result to a slot.
-_AARCH64_STORE = re.compile(
-    r"^x0,\s*\[(sp|x29|fp)(?:,\s*(#[+\-]?(?:0x[0-9a-f]+|\d+)))?\]$"
-)
-# `ldr x9, [sp, #0x8]` -> reload a stack slot into a register.
-_AARCH64_LOAD = re.compile(
-    r"^(x[0-9]+|sp|fp),\s*\[(sp|x29|fp)(?:,\s*(#[+\-]?(?:0x[0-9a-f]+|\d+)))?\]$"
-)
-# `mov x0, x9` -> register-to-register copy.
-_AARCH64_COPY = re.compile(r"^(x[0-9]+|sp|fp),\s*(x[0-9]+|sp|fp)$")
-# Dereference through a register base: `str wzr, [x9]`, `ldr w0, [x9, #4]`, etc.
-# The base register is the first GPR inside the bracketed memory operand. The
-# slot/frame registers (sp/x29/fp) are excluded so a stack-slot access (which is
-# NOT a dereference of the freed heap pointer) does not look like the use.
-_AARCH64_DEREF = re.compile(r"\[(x[0-9]+)(?!\d)")
 
 _AARCH64_PROFILE = _ArchProfile(
     arg_reg="x0",
@@ -148,26 +113,6 @@ _PROFILES: dict[str, _ArchProfile] = {
 _FRAME_REGS = frozenset({"rbp", "rsp", "sp", "x29", "fp"})
 
 
-def _profile_for(engine) -> _ArchProfile | None:
-    """The arch profile for the target, or ``None`` on an unsupported arch."""
-    try:
-        arch = engine.project.arch.name
-    except Exception:  # pragma: no cover - defensive
-        return None
-    return _PROFILES.get(arch)
-
-
-def _slot_key(prof: _ArchProfile, base: str, off: str | None) -> str:
-    """Normalize a (base, offset) pair into a comparable slot key.
-
-    AArch64 omits the offset for ``[sp]`` (offset 0); normalize that to ``+0``
-    so x86_64 and AArch64 keys share the same shape.
-    """
-    if off is None:
-        off = "+0"
-    return f"{base}{off.replace(' ', '').lstrip('#')}"
-
-
 def run(engine) -> list[Finding]:
     """Run both CWE-416 passes: intra-procedural and single-hop interprocedural.
 
@@ -181,7 +126,7 @@ def run(engine) -> list[Finding]:
     with the intra-procedural (higher-fidelity) finding taking precedence.
     """
     findings: list[Finding] = []
-    prof = _profile_for(engine)
+    prof = _profile_for(engine, _PROFILES)
     if prof is not None:
         # Run the intra-procedural scan only on a supported architecture; on an
         # unsupported arch it would mis-read register/slot conventions, so skip
@@ -200,17 +145,6 @@ def run(engine) -> list[Finding]:
         if f.address not in intra_addrs:
             findings.append(f)
     return findings
-
-
-def _flatten(func):
-    insns = []
-    for block in func.blocks:
-        try:
-            insns.extend(block.capstone.insns)
-        except Exception:  # pragma: no cover - defensive
-            continue
-    insns.sort(key=lambda i: i.address)
-    return insns
 
 
 def _scan_function(engine, func, prof: _ArchProfile):
@@ -268,6 +202,7 @@ def _scan_function(engine, func, prof: _ArchProfile):
                 continue
 
         # A dereference through an aliasing register is the use-after-free.
+        assert prof.deref_base is not None  # always set on CWE-416 profiles
         m_deref = prof.deref_base.search(insn.op_str)
         if m_deref:
             base = m_deref.group(1)
@@ -279,51 +214,6 @@ def _scan_function(engine, func, prof: _ArchProfile):
                 return _build_finding(func, malloc_addr, free_addr, insn.address, confidence)
 
     return None
-
-
-def _slot_after_malloc(insns, malloc_idx, prof: _ArchProfile):
-    """Return the stack-slot key that the malloc result is stored into."""
-    for nxt in insns[malloc_idx + 1 : malloc_idx + 6]:
-        if nxt.mnemonic != prof.store_mn:
-            continue
-        m = prof.store_ret_to_slot.match(nxt.op_str)
-        if m:
-            base = m.group(1)
-            off = m.group(2) if m.lastindex and m.lastindex >= 2 else None
-            return _slot_key(prof, base, off)
-    return None
-
-
-def _regs_aliasing_slot(insns, call_idx, slot, prof: _ArchProfile):
-    """Which registers alias ``slot`` in the instructions just before a call?"""
-    aliases: set[str] = set()
-    for prev in insns[max(0, call_idx - 8) : call_idx]:
-        if prev.mnemonic == prof.load_mn:
-            m_load = prof.load_slot_to_reg.match(prev.op_str)
-            if m_load:
-                base = m_load.group(2)
-                off = m_load.group(3) if m_load.lastindex and m_load.lastindex >= 3 else None
-                if _slot_key(prof, base, off) == slot:
-                    aliases.add(m_load.group(1))
-                    continue
-        if prev.mnemonic == "mov":
-            m_copy = prof.reg_copy.match(prev.op_str)
-            if m_copy and m_copy.group(2) in aliases:
-                aliases.add(m_copy.group(1))
-    return aliases
-
-
-def _is_call(engine, insn) -> bool:
-    """True if ``insn`` is a direct call on the target architecture."""
-    try:
-        return insn.mnemonic in engine._call_mnemonics()
-    except Exception:  # pragma: no cover - defensive
-        return insn.mnemonic == "call"
-
-
-def _resolve(engine, insn):
-    cfg = engine.cfg()
-    return engine._resolve_call_target(insn, cfg)
 
 
 def _build_finding(func, malloc_addr, free_addr, use_addr, confidence="medium"):
