@@ -275,6 +275,19 @@ class AngrEngine:
             pass
         return f"sub_{addr:x}"
 
+    def _func_by_name(self, cfg: Any, name: str) -> Any | None:
+        """Look up a function object by name in the CFG knowledge base.
+
+        Returns the first matching :class:`angr.knowledge_plugins.Function` or
+        ``None`` if no function with that name is found.  Used by the
+        interprocedural checks that need to walk a specific caller's instruction
+        stream after resolving its name from the call-graph.
+        """
+        for f in cfg.kb.functions.values():
+            if f.name == name:
+                return f
+        return None
+
     # -- Call-site discovery ---------------------------------------------
 
     # Direct-call mnemonics by architecture. x86_64 uses ``call``; AArch64 uses
@@ -360,7 +373,6 @@ class AngrEngine:
         if arch == "AARCH64":
             return self._frees_incoming_arg_aarch64(func, cfg)
 
-        import re
 
         store_param = re.compile(
             r"^(?:qword ptr )?\[(rbp|rsp)\s*([+\-]\s*(?:0x[0-9a-f]+|\d+))\],\s*rdi$"
@@ -410,7 +422,6 @@ class AngrEngine:
         spill) followed by ``bl free`` where ``x0`` was reloaded from the same
         slot.
         """
-        import re
 
         # ``str x0, [sp, #N]`` or ``str x0, [x29, #N]`` / ``[fp, #N]`` —
         # the prologue spill of the first incoming argument.
@@ -530,7 +541,6 @@ class AngrEngine:
         if self.project.arch.name == "AARCH64":
             return self._caller_uses_arg_after_call_aarch64(caller_name, call_addr)
 
-        import re
 
         load_slot = re.compile(
             r"^(r[a-z0-9]+),\s*(?:qword ptr )?\[(rbp|rsp)\s*([+\-]\s*(?:0x[0-9a-f]+|\d+))\]$"
@@ -539,11 +549,7 @@ class AngrEngine:
         deref_base = re.compile(r"\[(r[a-z0-9]+)")
 
         cfg = self.cfg()
-        func = None
-        for f in cfg.kb.functions.values():
-            if f.name == caller_name:
-                func = f
-                break
+        func = self._func_by_name(cfg, caller_name)
         if func is None:
             return None
 
@@ -604,7 +610,6 @@ class AngrEngine:
         dereference detected when any instruction reads ``[xR]`` where ``xR``
         aliases the slot.  Stops at the next ``bl`` (single-hop scope).
         """
-        import re
 
         load_slot = re.compile(
             r"^(x[0-9]+),\s*\[(sp|x29|fp)(?:,\s*(#[+\-]?(?:0x[0-9a-f]+|\d+)))?\]$"
@@ -613,11 +618,7 @@ class AngrEngine:
         deref_base = re.compile(r"\[(x[0-9]+)")
 
         cfg = self.cfg()
-        func = None
-        for f in cfg.kb.functions.values():
-            if f.name == caller_name:
-                func = f
-                break
+        func = self._func_by_name(cfg, caller_name)
         if func is None:
             return None
 
@@ -698,7 +699,6 @@ class AngrEngine:
         if self.project.arch.name == "AARCH64":
             return self._caller_frees_arg_before_call_aarch64(caller_name, call_addr)
 
-        import re
 
         load_slot = re.compile(
             r"^(r[a-z0-9]+),\s*(?:qword ptr )?\[(rbp|rsp)\s*([+\-]\s*(?:0x[0-9a-f]+|\d+))\]$"
@@ -709,11 +709,7 @@ class AngrEngine:
         reg_copy = re.compile(r"^(r[a-z0-9]+),\s*(r[a-z0-9]+)$")
 
         cfg = self.cfg()
-        func = None
-        for f in cfg.kb.functions.values():
-            if f.name == caller_name:
-                func = f
-                break
+        func = self._func_by_name(cfg, caller_name)
         if func is None:
             return None
 
@@ -778,7 +774,6 @@ class AngrEngine:
         free call.  A ``str x0, [sp/x29, #N]`` following a ``bl malloc``
         (i.e. a reallocation into the slot) cancels the candidate.
         """
-        import re
 
         load_slot = re.compile(
             r"^(x[0-9]+),\s*\[(sp|x29|fp)(?:,\s*(#[+\-]?(?:0x[0-9a-f]+|\d+)))?\]$"
@@ -789,11 +784,7 @@ class AngrEngine:
         reg_copy = re.compile(r"^(x[0-9]+),\s*(x[0-9]+)$")
 
         cfg = self.cfg()
-        func = None
-        for f in cfg.kb.functions.values():
-            if f.name == caller_name:
-                func = f
-                break
+        func = self._func_by_name(cfg, caller_name)
         if func is None:
             return None
 
@@ -857,7 +848,6 @@ class AngrEngine:
         result of a ``bl malloc|calloc|realloc`` (i.e. ``x0``) immediately
         before it — indicating the slot is being (re)allocated, not re-spilled.
         """
-        import re
 
         reg = re.compile(r"^(x[0-9]+),\s*\[")
         m = reg.match(insns[store_idx].op_str)
@@ -873,7 +863,6 @@ class AngrEngine:
 
     def _slots_aliasing_x0_before(self, insns: list, call_idx: int) -> set[str]:
         """Stack slots that aliased ``x0`` in the instructions before a ``bl``."""
-        import re
 
         load_slot = re.compile(
             r"^(x[0-9]+),\s*\[(sp|x29|fp)(?:,\s*(#[+\-]?(?:0x[0-9a-f]+|\d+)))?\]$"
@@ -900,7 +889,6 @@ class AngrEngine:
         ``rax`` result is what is being stored — i.e. the slot is being
         (re)allocated, not merely re-spilled.
         """
-        import re
 
         reg = re.compile(r"^(?:qword ptr )?\[[^\]]+\],\s*(r[a-z0-9]+)$")
         m = reg.match(insns[store_idx].op_str)
@@ -916,7 +904,6 @@ class AngrEngine:
 
     def _slots_aliasing_rdi_before(self, insns: list, call_idx: int) -> set[str]:
         """Stack slots that aliased ``rdi`` in the instructions before a call."""
-        import re
 
         load_slot = re.compile(
             r"^(r[a-z0-9]+),\s*(?:qword ptr )?\[(rbp|rsp)\s*([+\-]\s*(?:0x[0-9a-f]+|\d+))\]$"
@@ -1091,7 +1078,6 @@ class AngrEngine:
         and a non-literal reloads from a stack slot with ``ldr reg, [sp/x29
         +N]``/``ldur``.
         """
-        import re
 
         if self.project.arch.name == "AARCH64":
             # AArch64 (AAPCS64). A pointer argument is a full 64-bit value, so
@@ -1230,7 +1216,6 @@ class AngrEngine:
         ``ldur``). On any other architecture this returns ``False`` (the
         heuristic stays conservative).
         """
-        import re
 
         arch = self.project.arch.name
         if arch == "AARCH64":
@@ -1242,11 +1227,7 @@ class AngrEngine:
             # not matter for the CWE-787 suppression, only that it cannot be
             # attacker-controlled.
             cfg = self.cfg()
-            func = None
-            for f in cfg.kb.functions.values():
-                if f.name == caller_function:
-                    func = f
-                    break
+            func = self._func_by_name(cfg, caller_function)
             if func is None:
                 return False
             insns: list[Any] = []
@@ -1283,11 +1264,7 @@ class AngrEngine:
         )
 
         cfg = self.cfg()
-        func = None
-        for f in cfg.kb.functions.values():
-            if f.name == caller_function:
-                func = f
-                break
+        func = self._func_by_name(cfg, caller_function)
         if func is None:
             return False
 
@@ -1458,7 +1435,6 @@ class AngrEngine:
         the zero register — encodes a literal ``0``, e.g. ``umask(0)``), while a
         runtime value loads from memory (``ldr w1, [sp, #N]`` / ``ldur``).
         """
-        import re
 
         if self.project.arch.name == "AARCH64":
             # AArch64 (AAPCS64). Mode literals are materialized into the 32-bit
@@ -1578,7 +1554,6 @@ class AngrEngine:
         register and an immediate shift, medium). Returns ``None`` on any other
         architecture.
         """
-        import re
 
         arch = self.project.arch.name
         mnemonics = self._SIZE_ARITH_MNEMONICS.get(arch)
@@ -1758,7 +1733,6 @@ class AngrEngine:
         ``{"address": int, "function": str, "divisor": str}``. The list is empty
         on architectures other than AMD64/AARCH64.
         """
-        import re
 
         arch = self.project.arch.name
         if arch == "AMD64":
@@ -2026,7 +2000,6 @@ class AngrEngine:
     _MEM_OPS_AMD64: frozenset[str] = frozenset({"mov", "movzx", "movsx"})
 
     def _indexed_access_amd64(self, func: Any) -> tuple[int, str, bool] | None:
-        import re
 
         # A scaled-index memory operand like [reg+reg], [reg+reg*N], [base+reg].
         scaled_index = re.compile(r"\[[a-z0-9]+\s*\+\s*[a-z0-9]+(?:\s*\*\s*[0-9]+)?\]")
@@ -2088,7 +2061,6 @@ class AngrEngine:
     })
 
     def _indexed_access_aarch64(self, func: Any) -> tuple[int, str, bool] | None:
-        import re
 
         # add xD, xBase, xIdx — a base+index address computation combining two
         # distinct registers (the AArch64 way of forming arr+i at -O0). The
@@ -2225,7 +2197,6 @@ class AngrEngine:
 
     def _unchecked_alloc_dereferences_amd64(self) -> list[dict[str, Any]]:
         """x86_64 (SysV) implementation of :meth:`unchecked_alloc_dereferences`."""
-        import re
 
         cfg = self.cfg()
         call_mnemonics = self._call_mnemonics()
@@ -2736,7 +2707,6 @@ class AngrEngine:
 
     def _unfreed_allocations_amd64(self) -> list[dict[str, Any]]:
         """x86_64 (SysV) implementation of :meth:`unfreed_allocations`."""
-        import re
 
         cfg = self.cfg()
         call_mnemonics = self._call_mnemonics()
@@ -2927,7 +2897,6 @@ class AngrEngine:
 
     def _unfreed_allocations_aarch64(self) -> list[dict[str, Any]]:
         """AArch64 (AAPCS64) implementation of :meth:`unfreed_allocations`."""
-        import re
 
         cfg = self.cfg()
         call_mnemonics = self._call_mnemonics()
@@ -3280,7 +3249,6 @@ class AngrEngine:
           * AArch64: ``adrp x1, sym`` paired with ``add x1, x1, :lo12:sym``
             (page+offset address materialization, the canonical AAPCS64 form).
         """
-        import re
 
         call_insn = insns[call_idx]
         # Scan a small window back from the call. -O0 sets the argument
