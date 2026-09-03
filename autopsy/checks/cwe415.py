@@ -40,24 +40,23 @@ the engine-level CWE-190/134/732 checks were made arch-aware.
 
 from __future__ import annotations
 
-from autopsy.report import Finding, TaintPoint
 from autopsy.checks import cwe415_interproc
 from autopsy.checks._slot_scan import (
-    _ArchProfile,
-    _X86_STORE,
-    _X86_LOAD,
-    _X86_COPY,
-    _AARCH64_STORE,
-    _AARCH64_LOAD,
     _AARCH64_COPY,
-    _profile_for,
-    _slot_key,
+    _AARCH64_LOAD,
+    _AARCH64_STORE,
+    _X86_COPY,
+    _X86_LOAD,
+    _X86_STORE,
+    _ArchProfile,
     _flatten,
-    _slot_after_malloc,
-    _regs_aliasing_slot,
     _is_call,
+    _profile_for,
+    _regs_aliasing_slot,
     _resolve,
+    _slot_after_malloc,
 )
+from autopsy.report import Finding, TaintPoint
 
 # ---------------------------------------------------------------------------
 # CWE-415 arch profiles (no deref_base needed — double-free looks for a

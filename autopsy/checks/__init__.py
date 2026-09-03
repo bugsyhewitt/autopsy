@@ -10,9 +10,28 @@ from __future__ import annotations
 
 from typing import Callable
 
+from autopsy.checks import (
+    cwe22,
+    cwe78,
+    cwe119,
+    cwe125,
+    cwe134,
+    cwe190,
+    cwe327,
+    cwe338,
+    cwe362,
+    cwe367,
+    cwe369,
+    cwe377,
+    cwe401,
+    cwe415,
+    cwe416,
+    cwe476,
+    cwe676,
+    cwe732,
+    cwe787,
+)
 from autopsy.report import Finding
-
-from autopsy.checks import cwe119, cwe125, cwe134, cwe190, cwe22, cwe327, cwe338, cwe362, cwe367, cwe369, cwe377, cwe401, cwe415, cwe416, cwe476, cwe676, cwe732, cwe78, cwe787
 
 # CWE id -> check callable.
 CHECKS: dict[int, Callable[[object], list[Finding]]] = {

@@ -37,6 +37,13 @@ Homepage = "https://github.com/bugsyhewitt/autopsy"
 [tool.setuptools]
 packages = ["autopsy", "autopsy.checks"]
 
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
