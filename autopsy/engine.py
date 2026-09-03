@@ -76,8 +76,9 @@ class AngrEngine:
     """
 
     def __init__(self, binary_path: str, max_states: int = 1000) -> None:
-        import angr  # lazy, heavy import
         import logging
+
+        import angr  # lazy, heavy import
 
         # angr is extremely chatty; silence it for clean JSON output.
         for noisy in ("angr", "cle", "pyvex", "claripy"):
@@ -207,7 +208,9 @@ class AngrEngine:
     #
     # All register-level checks are now arch-aware; no check is skipped on
     # AArch64.
-    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (22, 78, 119, 125, 134, 190, 327, 338, 362, 367, 369, 377, 401, 415, 416, 476, 676, 732, 787)
+    _ARCH_AGNOSTIC_CHECKS: tuple[int, ...] = (
+        22, 78, 119, 125, 134, 190, 327, 338, 362, 367, 369, 377, 401, 415, 416, 476, 676, 732, 787
+    )
 
     def assert_supported(self) -> None:
         """Reject targets on architectures autopsy cannot analyze.
@@ -1104,7 +1107,11 @@ class AngrEngine:
                     ms = load_slot.match(prev.op_str)
                     if ms and self._aarch64_reg_in(ms.group(1), fmt_aliases):
                         disp = ms.group(3)
-                        slot = f"{ms.group(2)}{('+' + disp) if disp and not disp.startswith(('+', '-')) else (disp or '')}"
+                        if disp and not disp.startswith(('+', '-')):
+                            suffix = '+' + disp
+                        else:
+                            suffix = disp or ''
+                        slot = f"{ms.group(2)}{suffix}"
                         return slot
                     continue
                 if mnem in ("mov", "orr"):
@@ -2032,7 +2039,8 @@ class AngrEngine:
                 # A guarded access is the clean-baseline pattern; skip it.
                 return None
             # write if the memory operand is the dest.
-            kind = "write" if ops.strip().startswith("[") or self._amd64_dest_is_mem(ops) else "read"
+            dest_is_mem = ops.strip().startswith("[") or self._amd64_dest_is_mem(ops)
+            kind = "write" if dest_is_mem else "read"
             symbolic_index = bool(symbolic_index_re.search(ops))
             return (insn.address, kind, symbolic_index)
         return None
@@ -3250,7 +3258,6 @@ class AngrEngine:
             (page+offset address materialization, the canonical AAPCS64 form).
         """
 
-        call_insn = insns[call_idx]
         # Scan a small window back from the call. -O0 sets the argument
         # registers immediately before the call.
         window_start = max(0, call_idx - 16)

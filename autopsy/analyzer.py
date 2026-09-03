@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from autopsy.report import Report, Finding
+from autopsy.report import Finding, Report
 from autopsy.scope import resolve_checks
 
 
@@ -36,8 +36,8 @@ def analyze(
         max_states: angr resource cap.
         engine_factory: Builds the engine; injectable for tests.
     """
-    from autopsy.engine import StateLimitExceeded, EngineError
     from autopsy.checks import CHECKS
+    from autopsy.engine import EngineError, StateLimitExceeded
 
     cwes = resolve_checks(checks_token)
     report = Report(binary=binary, checks=cwes, max_states=max_states)

@@ -39,12 +39,17 @@ from autopsy.report import Finding, TaintPoint
 # A few high-signal pairings get a friendlier remediation hint; everything else
 # falls back to the generic descriptor-based advice.
 _FIX_HINTS: dict[tuple[str, str], str] = {
-    ("access", "open"): "open() first, then check the returned fd, or use access(..., AT_EACCESS) on a descriptor",
+    ("access", "open"): (
+        "open() first, then check the returned fd,"
+        " or use access(..., AT_EACCESS) on a descriptor"
+    ),
     ("access", "open64"): "open() first, then check the returned fd",
     ("access", "fopen"): "open the file once and operate on the descriptor",
     ("stat", "open"): "open() the file and fstat() the returned descriptor",
     ("lstat", "open"): "open() with O_NOFOLLOW and fstat() the descriptor",
-    ("stat", "unlink"): "operate on a descriptor (openat + O_NOFOLLOW) instead of re-resolving the path",
+    ("stat", "unlink"): (
+        "operate on a descriptor (openat + O_NOFOLLOW) instead of re-resolving the path"
+    ),
     ("lstat", "unlink"): "use unlinkat with the directory fd to avoid re-resolving the path",
 }
 

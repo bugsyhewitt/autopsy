@@ -48,9 +48,18 @@ _DANGEROUS: dict[str, tuple[str, str]] = {
     "sscanf": ("an unbounded %s conversion can overflow its target", "sscanf with field widths"),
     "fscanf": ("an unbounded %s conversion can overflow its target", "fgets + sscanf with widths"),
     # glibc emits the scanf family under __isoc99_ aliases at -O0.
-    "__isoc99_scanf": ("an unbounded %s conversion can overflow its target", "fgets + sscanf with widths"),
-    "__isoc99_sscanf": ("an unbounded %s conversion can overflow its target", "sscanf with field widths"),
-    "__isoc99_fscanf": ("an unbounded %s conversion can overflow its target", "fgets + sscanf with widths"),
+    "__isoc99_scanf": (
+        "an unbounded %s conversion can overflow its target",
+        "fgets + sscanf with widths",
+    ),
+    "__isoc99_sscanf": (
+        "an unbounded %s conversion can overflow its target",
+        "sscanf with field widths",
+    ),
+    "__isoc99_fscanf": (
+        "an unbounded %s conversion can overflow its target",
+        "fgets + sscanf with widths",
+    ),
 }
 
 # gets is the most dangerous of the set: it admits no safe usage at all, so a

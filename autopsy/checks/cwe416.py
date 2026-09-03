@@ -56,26 +56,26 @@ register's alias is rooted in a confirmed reload of the freed stack slot and
 
 from __future__ import annotations
 
-from autopsy.report import Finding, TaintPoint
 from autopsy.checks import cwe416_interproc
 from autopsy.checks._slot_scan import (
-    _ArchProfile,
-    _X86_STORE,
-    _X86_LOAD,
-    _X86_COPY,
-    _X86_DEREF,
-    _AARCH64_STORE,
-    _AARCH64_LOAD,
     _AARCH64_COPY,
     _AARCH64_DEREF,
-    _profile_for,
-    _slot_key,
+    _AARCH64_LOAD,
+    _AARCH64_STORE,
+    _X86_COPY,
+    _X86_DEREF,
+    _X86_LOAD,
+    _X86_STORE,
+    _ArchProfile,
     _flatten,
-    _slot_after_malloc,
-    _regs_aliasing_slot,
     _is_call,
+    _profile_for,
+    _regs_aliasing_slot,
     _resolve,
+    _slot_after_malloc,
+    _slot_key,
 )
+from autopsy.report import Finding, TaintPoint
 
 # ---------------------------------------------------------------------------
 # CWE-416 arch profiles (include deref_base to detect dereferences of the
